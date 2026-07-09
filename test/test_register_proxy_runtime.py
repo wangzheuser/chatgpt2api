@@ -1,19 +1,20 @@
 import unittest
 from unittest.mock import patch
 
-from services.proxy_service import ClearanceBundle, ProxyRuntimeProfile
+from services.proxy_service import ClearanceBundle
 from services.register import openai_register
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, text="", headers=None, url="https://auth.openai.com/test"):
+    def __init__(self, status_code=200, text="", headers=None, url="https://auth.openai.com/test", json_data=None):
         self.status_code = status_code
         self.text = text
         self.headers = headers or {}
         self.url = url
+        self._json_data = {} if json_data is None else json_data
 
     def json(self):
-        return {}
+        return self._json_data
 
 
 class FakeCookieJar:
@@ -43,18 +44,13 @@ class FakeProxySettings:
         self.build_headers_calls = []
         self.refresh_calls = []
 
+    class _Profile:
+        def __init__(self, enabled=True):
+            self.clearance_enabled = enabled
+
     def build_session_kwargs(self, **kwargs):
         self.session_kwargs_calls.append(kwargs)
         return dict(kwargs, proxy="http://runtime.example:8118")
-
-    def get_profile(self, **kwargs):
-        """返回启用 Cloudflare 清障的代理运行时配置。"""
-        return ProxyRuntimeProfile(
-            proxy_url="http://runtime.example:8118",
-            runtime_enabled=True,
-            egress_mode="single_proxy",
-            clearance={"enabled": True, "mode": "flaresolverr"},
-        )
 
     def build_headers(self, headers=None, target_url="", proxy="", upstream=True, **kwargs):
         self.build_headers_calls.append({"target_url": target_url, "proxy": proxy, "upstream": upstream})
@@ -67,6 +63,9 @@ class FakeProxySettings:
         self.refresh_calls.append({"target_url": target_url, "proxy": proxy, "force": force, "upstream": upstream})
         self.refreshed = self.bundle is not None
         return self.bundle
+
+    def get_profile(self, proxy="", upstream=True, **kwargs):
+        return self._Profile(enabled=True)
 
 
 class RegisterProxyRuntimeTests(unittest.TestCase):
@@ -197,6 +196,61 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("status=403", message)
         self.assertIn("challenge body", message)
+
+    def test_validate_otp_follows_continue_url(self):
+        with patch.object(
+            openai_register,
+            "create_session",
+            return_value=FakeSession(),
+        ), patch.object(
+            openai_register,
+            "validate_otp",
+            return_value=(
+                FakeResponse(
+                    status_code=200,
+                    text='{"continue_url":"https://auth.openai.com/authorize/continue?state=test"}',
+                    json_data={"continue_url": "https://auth.openai.com/authorize/continue?state=test"},
+                ),
+                "",
+            ),
+        ):
+            registrar = openai_register.PlatformRegistrar(proxy="")
+            seen = []
+            with patch.object(registrar, "_authorize_continue", side_effect=lambda url, index: seen.append((url, index))):
+                registrar._validate_otp("123456", 7)
+        self.assertEqual(seen, [("https://auth.openai.com/authorize/continue?state=test", 7)])
+
+    def test_create_account_adds_sentinel_and_so_headers(self):
+        with patch.object(
+            openai_register,
+            "create_session",
+            return_value=FakeSession(),
+        ):
+            registrar = openai_register.PlatformRegistrar(proxy="")
+        request_calls = []
+
+        def fake_request(session, method, url, retry_attempts=3, **kwargs):
+            request_calls.append(kwargs.get("headers") or {})
+            return FakeResponse(status_code=200, text='{"continue_url":"https://platform.openai.com/auth/callback?code=abc"}', json_data={"continue_url": "https://platform.openai.com/auth/callback?code=abc"}), ""
+
+        artifacts = openai_register.SentinelArtifacts(
+            token="sentinel-token",
+            so_token="so-token",
+            oai_sc_value="0cookie",
+            sdk_version="sdk-test",
+            observer_timeout_ms=5000,
+        )
+        with patch.object(registrar, "_build_sentinel", return_value=artifacts), patch.object(
+            openai_register,
+            "request_with_local_retry",
+            side_effect=fake_request,
+        ):
+            registrar._create_account("Demo User", "2000-01-01", 3)
+
+        lowered = {key.lower(): value for key, value in request_calls[0].items()}
+        self.assertEqual(lowered["openai-sentinel-token"], "sentinel-token")
+        self.assertEqual(lowered["openai-sentinel-so-token"], "so-token")
+        self.assertEqual(registrar.platform_auth_code, "abc")
 
 
 if __name__ == "__main__":

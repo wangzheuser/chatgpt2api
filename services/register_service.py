@@ -37,7 +37,28 @@ def _now() -> str:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {
+        **openai_register.config,
+        "mode": "total",
+        "target_quota": 100,
+        "target_available": 10,
+        "check_interval": 5,
+        "enabled": False,
+        "stats": {
+            "success": 0,
+            "fail": 0,
+            "done": 0,
+            "running": 0,
+            "threads": openai_register.config["threads"],
+            "elapsed_seconds": 0,
+            "avg_seconds": 0,
+            "success_rate": 0,
+            "current_quota": 0,
+            "current_available": 0,
+            "mail_provider_stats": {},
+            "mail_domain_stats": {},
+        },
+    }
 
 
 def _safe_bool(value: object, fallback: bool) -> bool:
@@ -197,7 +218,7 @@ class RegisterService:
             self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             with openai_register.stats_lock:
-                openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
+                openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time(), "mail_provider_stats": {}, "mail_domain_stats": {}})
             self._save()
             self._runner = threading.Thread(target=self._run, daemon=True, name="openai-register")
             self._runner.start()
@@ -215,9 +236,9 @@ class RegisterService:
     def reset(self) -> dict:
         with self._lock:
             self._logs = []
-            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **self._pool_metrics(), "updated_at": _now()}
+            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "mail_provider_stats": {}, "mail_domain_stats": {}, **self._pool_metrics(), "updated_at": _now()}
             with openai_register.stats_lock:
-                openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": 0.0})
+                openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": 0.0, "mail_provider_stats": {}, "mail_domain_stats": {}})
             self._save()
             return self.get()
 
@@ -248,7 +269,7 @@ class RegisterService:
         items = account_service.list_accounts()
         normal = [item for item in items if item.get("status") == "正常"]
         return {
-            "current_quota": sum(int(item.get("quota") or 0) for item in normal),
+            "current_quota": sum(int(item.get("quota") or 0) for item in normal if not item.get("image_quota_unknown")),
             "current_available": len(normal),
         }
 
@@ -268,7 +289,13 @@ class RegisterService:
 
     def _bump(self, **updates) -> None:
         with self._lock:
+            with openai_register.stats_lock:
+                runtime_updates = {
+                    "mail_provider_stats": json.loads(json.dumps(openai_register.stats.get("mail_provider_stats") or {}, ensure_ascii=False)),
+                    "mail_domain_stats": json.loads(json.dumps(openai_register.stats.get("mail_domain_stats") or {}, ensure_ascii=False)),
+                }
             self._config["stats"].update(updates)
+            self._config["stats"].update(runtime_updates)
             stats = self._config["stats"]
             started_at = str(stats.get("started_at") or "")
             if started_at:

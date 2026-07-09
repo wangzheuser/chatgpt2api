@@ -325,6 +325,15 @@ export type OutlookPoolStats = {
   failed: number;
 };
 
+export type RegisterStatsBucket = {
+  attempts: number;
+  success: number;
+  fail: number;
+  success_rate: number;
+  last_error?: string;
+  updated_at?: string;
+};
+
 export type RegisterConfig = {
   enabled: boolean;
   mail: {
@@ -356,6 +365,8 @@ export type RegisterConfig = {
     started_at?: string;
     updated_at?: string;
     finished_at?: string;
+    mail_provider_stats?: Record<string, RegisterStatsBucket>;
+    mail_domain_stats?: Record<string, RegisterStatsBucket>;
   };
   logs?: Array<{
     time: string;
