@@ -12,13 +12,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from curl_cffi import requests
 
 from services.account_service import account_service
 from services.proxy_service import ClearanceBundle, proxy_settings
 from services.register import mail_provider
+from utils.proxy_template import render_proxy_template
 
 base_dir = Path(__file__).resolve().parent
 config = {
@@ -56,7 +57,14 @@ sec_ch_ua_full_version_list = '"Chromium";v="145.0.0.0", "Not:A-Brand";v="99.0.0
 default_timeout = 30
 print_lock = threading.Lock()
 stats_lock = threading.Lock()
-stats = {"done": 0, "success": 0, "fail": 0, "start_time": 0.0}
+stats = {
+    "done": 0,
+    "success": 0,
+    "fail": 0,
+    "start_time": 0.0,
+    "mail_provider_stats": {},
+    "mail_domain_stats": {},
+}
 register_log_sink = None
 
 common_headers = {
@@ -260,7 +268,12 @@ def wait_for_code(mailbox: dict, register_proxy: str = "") -> str | None:
     return mail_provider.wait_for_code(_mail_config(register_proxy), mailbox)
 
 
-from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
+from utils.sentinel import (
+    DEFAULT_SENTINEL_FLOW_TIMEOUT_MS,
+    SentinelArtifacts,
+    build_sentinel_artifacts as _build_sentinel_artifacts,
+    build_sentinel_token as _build_sentinel_token_tuple,
+)  # noqa: F401
 
 
 def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> str:
@@ -269,9 +282,58 @@ def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -
     return sentinel_val
 
 
+def build_sentinel_artifacts(
+    session: requests.Session,
+    device_id: str,
+    flow: str,
+    *,
+    observer_timeout_ms: int = DEFAULT_SENTINEL_FLOW_TIMEOUT_MS,
+) -> SentinelArtifacts:
+    return _build_sentinel_artifacts(
+        session,
+        device_id,
+        flow,
+        user_agent=user_agent,
+        sec_ch_ua=sec_ch_ua,
+        observer_timeout_ms=observer_timeout_ms,
+    )
+
+
+def _stats_bucket_key(mailbox: dict, *, use_domain: bool) -> str:
+    if use_domain:
+        return str(str(mailbox.get("address") or "").partition("@")[2] or "").strip().lower()
+    provider = str(mailbox.get("provider") or "").strip()
+    provider_ref = str(mailbox.get("provider_ref") or "").strip()
+    label = str(mailbox.get("label") or "").strip()
+    return label or "#".join(part for part in (provider, provider_ref) if part)
+
+
+def _record_bucket(stats_map: dict[str, dict], key: str, *, success: bool, error: Exception | str | None = None) -> None:
+    key = str(key or "").strip().lower()
+    if not key:
+        return
+    entry = stats_map.setdefault(key, {"attempts": 0, "success": 0, "fail": 0, "success_rate": 0.0, "last_error": "", "updated_at": ""})
+    entry["attempts"] = int(entry.get("attempts") or 0) + 1
+    if success:
+        entry["success"] = int(entry.get("success") or 0) + 1
+        entry["last_error"] = ""
+    else:
+        entry["fail"] = int(entry.get("fail") or 0) + 1
+        entry["last_error"] = str(error or "")[:300]
+    total = max(1, int(entry.get("success") or 0) + int(entry.get("fail") or 0))
+    entry["success_rate"] = round(int(entry.get("success") or 0) * 100 / total, 1)
+    entry["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def record_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
+    with stats_lock:
+        _record_bucket(stats.setdefault("mail_provider_stats", {}), _stats_bucket_key(mailbox, use_domain=False), success=success, error=error)
+        _record_bucket(stats.setdefault("mail_domain_stats", {}), _stats_bucket_key(mailbox, use_domain=True), success=success, error=error)
+
+
 def create_session(proxy: str = "") -> Any:
     kwargs = proxy_settings.build_session_kwargs(
-        proxy=proxy,
+        proxy=render_proxy_template(proxy),
         upstream=True,
         impersonate="chrome",
         verify=False,
@@ -338,7 +400,14 @@ def validate_otp(session: requests.Session, device_id: str, code: str):
     resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers, verify=False)
     if resp is not None and resp.status_code == 200:
         return resp, ""
-    headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, "authorize_continue")
+    sentinel_val, oai_sc_val = _build_sentinel_token_tuple(session, device_id, "authorize_continue", user_agent=user_agent, sec_ch_ua=sec_ch_ua)
+    headers["openai-sentinel-token"] = sentinel_val
+    if oai_sc_val:
+        for domain in (".openai.com", "openai.com", ".auth.openai.com", "auth.openai.com"):
+            try:
+                session.cookies.set("oai-sc", oai_sc_val, domain=domain)
+            except Exception:
+                continue
     resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers, verify=False)
     return resp, error
 
@@ -354,6 +423,27 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     if not code:
         return None
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
+
+
+def extract_continue_url(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
+        return ""
+    direct = str(data.get("continue_url") or data.get("continueUrl") or "").strip()
+    if direct:
+        return direct
+    page = data.get("page")
+    if isinstance(page, dict):
+        payload = page.get("payload")
+        if isinstance(payload, dict):
+            nested = str(payload.get("continue_url") or payload.get("continueUrl") or payload.get("next_url") or payload.get("nextUrl") or "").strip()
+            if nested:
+                return nested
+    session_info = data.get("oai-client-auth-session")
+    if isinstance(session_info, dict):
+        nested = str(session_info.get("continue_url") or session_info.get("continueUrl") or "").strip()
+        if nested:
+            return nested
+    return ""
 
 
 def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
@@ -396,13 +486,16 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
 
 class PlatformRegistrar:
     def __init__(self, proxy: str = "") -> None:
-        self.proxy = str(proxy or "").strip()
+        # 渲染 {uuid} 占位符：本次注册的邮箱 session 与 OpenAI session 共用同一出口会话，
+        # 且 clearance 刷新、header 构造复用同一个已渲染代理，避免 {uuid} 泄漏到 URL 解析处。
+        self.proxy = render_proxy_template(str(proxy or "").strip())
         self.session = create_session(self.proxy)
         self.clearance_user_agent = ""
         self.clearance_failure_reason = ""
         self.device_id = str(uuid.uuid4())
         self.code_verifier = ""
         self.platform_auth_code = ""
+        self.last_otp_continue_url = ""
 
     def close(self) -> None:
         self.session.close()
@@ -419,6 +512,39 @@ class PlatformRegistrar:
         headers["oai-device-id"] = self.device_id
         headers.update(_make_trace_headers())
         return headers
+
+    def _apply_sentinel_cookie(self, artifacts: SentinelArtifacts) -> None:
+        value = str(getattr(artifacts, "oai_sc_value", "") or "").strip()
+        if not value:
+            return
+        for domain in (".openai.com", "openai.com", ".auth.openai.com", "auth.openai.com"):
+            try:
+                self.session.cookies.set("oai-sc", value, domain=domain)
+            except Exception:
+                continue
+
+    def _log_sentinel_artifacts(self, index: int, flow: str, artifacts: SentinelArtifacts) -> None:
+        step(
+            index,
+            "Sentinel 准备完成"
+            f" flow={flow}"
+            f" sdk={artifacts.sdk_version or '?'}"
+            f" token_len={len(str(artifacts.token or ''))}"
+            f" so_token={'yes' if artifacts.so_token else 'no'}"
+            f" so_len={len(str(artifacts.so_token or ''))}"
+            f" wait_ms={artifacts.observer_timeout_ms}",
+        )
+
+    def _build_sentinel(self, flow: str, index: int, *, observer_timeout_ms: int = DEFAULT_SENTINEL_FLOW_TIMEOUT_MS) -> SentinelArtifacts:
+        artifacts = build_sentinel_artifacts(
+            self.session,
+            self.device_id,
+            flow,
+            observer_timeout_ms=observer_timeout_ms,
+        )
+        self._apply_sentinel_cookie(artifacts)
+        self._log_sentinel_artifacts(index, flow, artifacts)
+        return artifacts
 
     def _refresh_cloudflare_clearance(self, target_url: str, index: int) -> ClearanceBundle | None:
         self.clearance_failure_reason = ""
@@ -498,7 +624,7 @@ class PlatformRegistrar:
         step(index, "开始提交注册密码")
         url = f"{auth_base}/api/accounts/user/register"
         headers = self._json_headers(f"{auth_base}/create-account/password")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
+        headers["openai-sentinel-token"] = self._build_sentinel("username_password_create", index).token
         headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
         resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
         if _is_cloudflare_challenge(resp):
@@ -506,7 +632,7 @@ class PlatformRegistrar:
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
             headers = self._json_headers(f"{auth_base}/create-account/password")
-            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
+            headers["openai-sentinel-token"] = self._build_sentinel("username_password_create", index).token
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
             if _is_cloudflare_challenge(resp):
@@ -546,13 +672,44 @@ class PlatformRegistrar:
             except Exception:
                 pass
             raise RuntimeError(error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
+        data = _response_json(resp)
+        continue_url = extract_continue_url(data)
+        if continue_url:
+            self.last_otp_continue_url = continue_url
+            self._authorize_continue(continue_url, index)
         step(index, "验证码校验完成")
+
+    def _authorize_continue(self, continue_url: str, index: int) -> None:
+        url = str(continue_url or "").strip()
+        if not url:
+            return
+        if not url.lower().startswith("http"):
+            url = urljoin(f"{auth_base}/", url.lstrip("/"))
+        step(index, "开始执行 authorize/continue")
+        headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/email-verification"), url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/email-verification"), url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+        if resp is None or resp.status_code not in (200, 302):
+            raise RuntimeError(error or f"authorize_continue_http_{getattr(resp, 'status_code', 'unknown')}")
+        step(index, f"authorize/continue 完成 url={str(getattr(resp, 'url', '') or '')[:160]}")
 
     def _create_account(self, name: str, birthdate: str, index: int) -> None:
         step(index, "开始创建账号资料")
         url = f"{auth_base}/api/accounts/create_account"
         headers = self._json_headers(f"{auth_base}/about-you")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
+        artifacts = self._build_sentinel("oauth_create_account", index, observer_timeout_ms=5000)
+        headers["openai-sentinel-token"] = artifacts.token
+        if artifacts.so_token:
+            headers["openai-sentinel-so-token"] = artifacts.so_token
+        else:
+            step(index, "Sentinel 未生成 so-token，create_account 成功率可能偏低", "yellow")
         headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
         resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
         if _is_cloudflare_challenge(resp):
@@ -560,7 +717,12 @@ class PlatformRegistrar:
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
             headers = self._json_headers(f"{auth_base}/about-you")
-            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
+            artifacts = self._build_sentinel("oauth_create_account", index, observer_timeout_ms=5000)
+            headers["openai-sentinel-token"] = artifacts.token
+            if artifacts.so_token:
+                headers["openai-sentinel-so-token"] = artifacts.so_token
+            else:
+                step(index, "Sentinel 未生成 so-token，create_account 成功率可能偏低", "yellow")
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
             resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
             if _is_cloudflare_challenge(resp):
@@ -608,8 +770,10 @@ class PlatformRegistrar:
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             tokens = self._exchange_registered_tokens(index)
         except Exception as error:
+            record_mailbox_result(mailbox, success=False, error=error)
             mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
             raise
+        record_mailbox_result(mailbox, success=True)
         mail_provider.mark_mailbox_result(mailbox, success=True)
         return {
             "email": email,

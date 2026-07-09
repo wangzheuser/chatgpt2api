@@ -1,0 +1,43 @@
+{
+  "_comment": "自动注册邮箱渠道示例配置。复制为 data/register.json 后由后台注册页读取；也可直接在 Web 注册页配置。以下渠道及域名均为逐(渠道,域名)真实 OpenAI 注册实测得出（每个组合至少 5 次）。mail.providers 里 enable=true 的渠道会被轮询使用；domain 指定后只用这些域名。",
+  "_test_summary": "实测可注册域名（dropmail）：mail2me.co 5/5、pickmemail.com 5/5、maximail.vip 5/5、mailtowin.com 4/5、pickmail.org 4/5。openinbox 服务端随机域名 3/5（不稳定，默认禁用）。其余渠道邮箱能收到 OpenAI 验证码但域名被 OpenAI 注册黑名单拦截（unsupported_email / registration_disallowed），或收不到验证码，故默认禁用。",
+  "proxy": "http://127.0.0.1:7890",
+  "total": 10,
+  "threads": 3,
+  "mail": {
+    "request_timeout": 30,
+    "wait_timeout": 120,
+    "wait_interval": 3,
+    "api_use_register_proxy": true,
+    "providers": [
+      {
+        "_note": "dropmail：实测这 5 个域名可稳定通过 OpenAI 注册，其中前三个 5/5。指定 domain 避免轮到被封域名。",
+        "type": "dropmail",
+        "enable": true,
+        "domain": ["mail2me.co", "pickmemail.com", "maximail.vip", "mailtowin.com", "pickmail.org"]
+      },
+      {
+        "_note": "openinbox：服务端随机分配域名，注册成功率约 3/5（部分随机域名被封），作为备选。",
+        "type": "openinbox",
+        "enable": false,
+        "domain": []
+      },
+      {
+        "_note": "以下渠道邮箱功能正常、能收到 OpenAI 验证码，但默认域名多被 OpenAI 拉黑。可自行填入未被封的自定义域名后启用。",
+        "type": "tempmailplus",
+        "enable": false,
+        "domain": []
+      },
+      {
+        "type": "freecustom",
+        "enable": false,
+        "domain": []
+      },
+      {
+        "type": "guerrillamail",
+        "enable": false,
+        "domain": []
+      }
+    ]
+  }
+}
