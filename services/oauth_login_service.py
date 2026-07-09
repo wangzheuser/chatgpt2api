@@ -21,7 +21,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from curl_cffi import requests
 
-from services.openai_oauth import (
+from services.proxy_service import proxy_settings
+from services.register.openai_register import (
     auth_base,
     common_headers,
     platform_auth0_client,
@@ -32,7 +33,6 @@ from services.openai_oauth import (
     sec_ch_ua,
     user_agent,
 )
-from services.proxy_service import proxy_settings
 
 
 class OAuthLoginError(Exception):
