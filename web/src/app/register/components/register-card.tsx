@@ -11,6 +11,10 @@ import { Textarea } from "@/components/ui/textarea";
 
 import { useSettingsStore } from "../../settings/store";
 
+// dropmail 本地实测可稳定注册 OpenAI 的域名（前 3 个 5/5，后 2 个 4/5）。
+// 前端以复选框形式提供，勾选多个时后端注册会轮询使用。
+const DROPMAIL_REGISTRABLE_DOMAINS = ["mail2me.co", "pickmemail.com", "maximail.vip", "mailtowin.com", "pickmail.org"];
+
 export function RegisterCard() {
   const config = useSettingsStore((state) => state.registerConfig);
   const isLoading = useSettingsStore((state) => state.isLoadingRegister);
@@ -59,8 +63,9 @@ export function RegisterCard() {
       ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
       ...(type === "ddg_mail" ? { ddg_token: "", cf_inbox_jwt: "", cf_domain: [], admin_password: "" } : {}),
       ...(type === "outlook_token" ? { mailboxes: "", mode: "graph", imap_host: "outlook.office365.com", message_limit: 10 } : {}),
-      // 以下为从 kirox 移植的公共临时邮箱渠道，零配置，domain 可选（留空用服务默认域名池）
-      ...(["dropmail", "openinbox", "mailtm", "mailgw", "guerrillamail", "tempmailplus", "freecustom", "inboxkitten", "tempmailo", "emailnator", "mailporary"].includes(type) ? { domain: [] } : {}),
+      // dropmail：默认勾选全部实测可注册域名；openinbox：服务端随机域名，无需选
+      ...(type === "dropmail" ? { domain: [...DROPMAIL_REGISTRABLE_DOMAINS] } : {}),
+      ...(type === "openinbox" ? { domain: [] } : {}),
     });
   };
 
@@ -198,16 +203,7 @@ export function RegisterCard() {
                             <SelectItem value="ddg_mail">ddg_mail (DDG邮箱+CF中转)</SelectItem>
                             <SelectItem value="outlook_token">outlook_token (Outlook/Hotmail 邮箱池)</SelectItem>
                             <SelectItem value="dropmail">dropmail (零配置·推荐，实测可注册)</SelectItem>
-                            <SelectItem value="openinbox">openinbox (零配置，部分可注册)</SelectItem>
-                            <SelectItem value="tempmailplus">tempmailplus (零配置·可收码，需自定义域名)</SelectItem>
-                            <SelectItem value="freecustom">freecustom (零配置·可收码，需自定义域名)</SelectItem>
-                            <SelectItem value="guerrillamail">guerrillamail (零配置·可收码)</SelectItem>
-                            <SelectItem value="inboxkitten">inboxkitten (零配置·可收码)</SelectItem>
-                            <SelectItem value="mailtm">mailtm (零配置)</SelectItem>
-                            <SelectItem value="mailgw">mailgw (零配置)</SelectItem>
-                            <SelectItem value="tempmailo">tempmailo (零配置)</SelectItem>
-                            <SelectItem value="emailnator">emailnator (零配置·Gmail 别名)</SelectItem>
-                            <SelectItem value="mailporary">mailporary (零配置)</SelectItem>
+                            <SelectItem value="openinbox">openinbox (零配置，实测部分可注册)</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -351,7 +347,32 @@ export function RegisterCard() {
                       );
                     })() : null}
 
-                    {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" || ["dropmail", "openinbox", "mailtm", "mailgw", "guerrillamail", "tempmailplus", "freecustom", "inboxkitten", "tempmailo", "emailnator", "mailporary"].includes(type) ? (
+                    {type === "dropmail" ? (
+                      <div className="space-y-2">
+                        <label className="text-sm text-stone-700">可注册域名（实测通过，可多选，注册时自动轮询）</label>
+                        <div className="grid grid-cols-2 gap-2 rounded-xl border border-stone-200 bg-white p-3">
+                          {DROPMAIL_REGISTRABLE_DOMAINS.map((dom) => {
+                            const selected = Array.isArray(provider.domain) ? provider.domain.map(String) : [];
+                            const checked = selected.includes(dom);
+                            return (
+                              <label key={dom} className="flex items-center gap-2 text-sm text-stone-700">
+                                <Checkbox
+                                  checked={checked}
+                                  onCheckedChange={(value) => {
+                                    const next = value ? [...selected, dom] : selected.filter((d) => d !== dom);
+                                    updateProvider(index, { domain: next });
+                                  }}
+                                  disabled={config.enabled}
+                                />
+                                {dom}
+                              </label>
+                            );
+                          })}
+                        </div>
+                        <p className="text-xs text-stone-400">全不勾则默认使用全部实测可注册域名。</p>
+                      </div>
+                    ) : null}
+                    {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : "Domain"}</label>
                         <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />

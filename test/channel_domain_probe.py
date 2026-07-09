@@ -27,11 +27,7 @@ warnings.filterwarnings("ignore")
 
 from services.register import mail_provider, openai_register  # noqa: E402
 
-ALL_PROVIDERS = [
-    "dropmail", "openinbox", "mailtm", "mailgw", "guerrillamail",
-    "tempmailplus", "freecustom", "inboxkitten", "tempmailo",
-    "emailnator", "mailporary",
-]
+ALL_PROVIDERS = ["dropmail", "openinbox"]
 
 FIRST_STEP_WAIT = 35  # 第一步收码等待上限（秒）；OpenAI 验证码通常 5-10s 内到
 

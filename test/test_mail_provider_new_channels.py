@@ -44,12 +44,7 @@ def test_factory_instantiates_new_channels() -> None:
     conf = _conf()
     for ptype, cls in [
         ("dropmail", m.DropMailProvider),
-        ("mailtm", m.MailTmProvider),
-        ("mailgw", m.MailGwProvider),
-        ("guerrillamail", m.GuerrillaMailProvider),
-        ("tempmailplus", m.TempMailPlusProvider),
         ("openinbox", m.OpenInboxProvider),
-        ("freecustom", m.FreeCustomProvider),
     ]:
         provider = m._create_provider(
             {"providers": [{"type": ptype, "enable": True}], "request_timeout": 10, "wait_timeout": 5, "wait_interval": 1},
