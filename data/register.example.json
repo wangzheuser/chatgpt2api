@@ -1,6 +1,6 @@
 {
-  "_comment": "自动注册邮箱渠道示例配置。复制为 data/register.json 后由后台注册页读取；也可直接在 Web 注册页配置。仅保留本地实测能注册成功的临时邮箱渠道（逐(渠道,域名)真实 OpenAI 注册，每组合至少 5 次）。",
-  "_test_summary": "实测可注册：dropmail 的 mail2me.co 5/5、pickmemail.com 5/5、maximail.vip 5/5、mailtowin.com 4/5、pickmail.org 4/5；openinbox 服务端随机域名 3/5(不稳定)。其余渠道(mailtm/mailgw/guerrillamail/tempmailplus/freecustom/inboxkitten/tempmailo/emailnator/mailporary)邮箱能收码但域名被 OpenAI 拉黑或收不到码，实测 0 注册成功，已从代码移除。",
+  "_comment": "自动注册邮箱渠道示例配置。复制为 data/register.json 后由后台注册页读取；也可直接在 Web 注册页配置。以下为本地实测均可创建邮箱的零配置临时邮箱渠道，mail.providers 里多个 enable=true 的渠道注册时会自动轮询(无需手动逐个切换)。",
+  "_note_domain": "临时邮箱域名可能被 OpenAI 动态封禁(报 account_creation_failed / unsupported_email)，某天能注册的域名过几天可能失效。启用多个渠道轮询可提高成功率。dropmail 的 domain 列的是曾实测可注册的域名(会变)，其余渠道留空用服务默认域名。",
   "proxy": "http://127.0.0.1:7890",
   "total": 10,
   "threads": 3,
@@ -10,18 +10,14 @@
     "wait_interval": 3,
     "api_use_register_proxy": true,
     "providers": [
-      {
-        "_note": "dropmail：domain 列出实测可注册的域名，可多选，注册时轮询。留空则用全部 5 个默认可注册域名。",
-        "type": "dropmail",
-        "enable": true,
-        "domain": ["mail2me.co", "pickmemail.com", "maximail.vip", "mailtowin.com", "pickmail.org"]
-      },
-      {
-        "_note": "openinbox：服务端随机分配域名，成功率约 3/5(部分随机域名被封)，作为备选默认禁用。",
-        "type": "openinbox",
-        "enable": false,
-        "domain": []
-      }
+      { "type": "dropmail", "enable": true, "domain": ["mail2me.co", "pickmemail.com", "maximail.vip", "mailtowin.com", "pickmail.org"] },
+      { "type": "openinbox", "enable": true, "domain": [] },
+      { "type": "mailtm", "enable": true, "domain": [] },
+      { "type": "guerrillamail", "enable": true, "domain": [] },
+      { "type": "tempmailplus", "enable": true, "domain": [] },
+      { "type": "freecustom", "enable": true, "domain": [] },
+      { "type": "inboxkitten", "enable": true, "domain": [] },
+      { "type": "emailnator", "enable": true, "domain": [] }
     ]
   }
 }

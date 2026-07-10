@@ -1590,6 +1590,368 @@ class OpenInboxProvider(BaseMailProvider):
         self.session.close()
 
 
+class _HydraMailProvider(BaseMailProvider):
+    """mail.tm / mail.gw 共用的 Hydra/JSON-LD 邮箱 API 基类。
+
+    两家服务除 API base 与域名池不同外，创建账号、取 token、拉邮件的路径完全一致。
+    """
+
+    api_base = ""
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = str(entry.get("api_base") or self.api_base).rstrip("/")
+        # entry["domain"] 若指定则作为强制域名白名单，用于逐域名测试
+        self.forced_domains = [str(d).strip().lower() for d in (entry.get("domain") or []) if str(d).strip()]
+        self.session = _create_session(conf)
+        self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/ld+json, application/json, text/plain, */*"})
+
+    def _request(self, method: str, path: str, token: str = "", payload: dict | None = None, expected: tuple[int, ...] = (200, 201)):
+        headers = {"Content-Type": "application/json"} if payload is not None else {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers=headers, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code not in expected:
+            raise RuntimeError(f"{self.name} 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+        return resp.json() if resp.text.strip() else {}
+
+    def _domains(self) -> list[str]:
+        data = self._request("GET", "/domains?page=1", expected=(200,))
+        items = data if isinstance(data, list) else (data.get("hydra:member") or data.get("data") or data.get("domains") or [])
+        out = [str(item.get("domain") or "").strip().lower() for item in items if isinstance(item, dict) and item.get("isActive", True)]
+        return [d for d in out if d]
+
+    def list_candidate_domains(self) -> list[str]:
+        return self.forced_domains or self._domains()
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        domains = self.forced_domains or self._domains()
+        if not domains:
+            raise RuntimeError(f"{self.name} 没有可用域名")
+        last_error = ""
+        for attempt in range(5):
+            domain = domains[attempt % len(domains)]
+            address = f"{username or _random_mailbox_name()}@{domain}".lower()
+            password = "Kx!" + "".join(random.choices(string.ascii_letters + string.digits, k=16))
+            try:
+                self._request("POST", "/accounts", payload={"address": address, "password": password})
+                token_data = self._request("POST", "/token", payload={"address": address, "password": password}, expected=(200,))
+                token = str(token_data.get("token") or "").strip()
+                if not token:
+                    raise RuntimeError("token 响应缺少 token")
+                return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+            except RuntimeError as error:
+                last_error = str(error)
+                username = None  # 换随机名重试
+        raise RuntimeError(last_error or f"{self.name} 邮箱生成失败")
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        token = str(mailbox.get("token") or "")
+        data = self._request("GET", "/messages", token=token, expected=(200,))
+        items = data if isinstance(data, list) else (data.get("hydra:member") or data.get("messages") or data.get("data") or [])
+        messages = [item for item in items if isinstance(item, dict)]
+        if not messages:
+            return None
+        item = messages[0]
+        message_id = str(item.get("id") or item.get("@id") or "").replace("/messages/", "").strip("/")
+        if message_id:
+            item = self._request("GET", f"/messages/{message_id}", token=token, expected=(200,))
+        text_content, html_content = _extract_content(item)
+        if not text_content and not html_content:
+            body = item.get("body") if isinstance(item.get("body"), dict) else {}
+            text_content = str(item.get("text") or (body.get("text") if isinstance(body, dict) else "") or item.get("intro") or "")
+            html_content = str(item.get("html") or (body.get("html") if isinstance(body, dict) else "") or "")
+            if isinstance(item.get("html"), list):
+                html_content = "".join(str(v) for v in item["html"])
+        sender = item.get("from") or ""
+        if isinstance(sender, dict):
+            sender = sender.get("address") or sender.get("name") or ""
+        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": message_id, "subject": str(item.get("subject") or ""), "sender": str(sender), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(item.get("createdAt") or item.get("created_at") or item.get("receivedAt")), "raw": item}
+
+    def close(self) -> None:
+        self.session.close()
+
+
+
+class MailTmProvider(_HydraMailProvider):
+    name = "mailtm"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__({**entry, "api_base": str(entry.get("api_base") or "https://api.mail.tm")}, conf)
+
+
+
+class GuerrillaMailProvider(BaseMailProvider):
+    name = "guerrillamail"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = str(entry.get("api_base") or "https://api.guerrillamail.com/ajax.php").rstrip("/")
+        self.session = _create_session(conf)
+        self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json,text/plain,*/*", "Referer": "https://www.guerrillamail.com/"})
+
+    def _get(self, params: dict) -> dict:
+        resp = self.session.get(self.api_base, params=params, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code != 200:
+            raise RuntimeError(f"GuerrillaMail 请求失败: {params.get('f')}, HTTP {resp.status_code}, body={resp.text[:300]}")
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        data = self._get({"f": "get_email_address", "lang": "en"})
+        address = str(data.get("email_addr") or "").strip()
+        sid_token = str(data.get("sid_token") or "").strip()
+        if not address or not sid_token:
+            raise RuntimeError("GuerrillaMail 创建响应缺少 email_addr/sid_token")
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": sid_token}
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        sid_token = str(mailbox.get("token") or "")
+        data = self._get({"f": "check_email", "seq": "0", "sid_token": sid_token})
+        items = data.get("list") or data.get("messages") or []
+        messages = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        if not messages:
+            return None
+        item = messages[0]
+        message_id = str(item.get("mail_id") or item.get("id") or item.get("email_id") or "").strip()
+        detail = item
+        if message_id:
+            detail = self._get({"f": "fetch_email", "email_id": message_id, "sid_token": sid_token}) or item
+        html_content = str(detail.get("mail_body") or detail.get("body") or "")
+        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": message_id, "subject": str(detail.get("mail_subject") or detail.get("subject") or ""), "sender": str(detail.get("mail_from") or detail.get("from") or ""), "text_content": str(detail.get("mail_excerpt") or ""), "html_content": html_content, "received_at": _parse_received_at(detail.get("mail_timestamp") or detail.get("mail_date")), "raw": detail}
+
+    def close(self) -> None:
+        self.session.close()
+
+
+
+class TempMailPlusProvider(BaseMailProvider):
+    name = "tempmailplus"
+    default_domains = ["fextemp.com", "fexbox.org", "merepost.com", "rover.info", "fexpost.com", "mailto.plus"]
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = "https://tempmail.plus"
+        self.domain = [str(d).strip().lower() for d in (entry.get("domain") or [])] or list(self.default_domains)
+        self.session = _create_session(conf)
+        self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json,text/plain,*/*", "Referer": "https://tempmail.plus/"})
+
+    def _list(self, address: str) -> list[dict]:
+        resp = self.session.get(f"{self.api_base}/api/mails", params={"email": address, "limit": "20"}, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code != 200:
+            raise RuntimeError(f"TempMail.plus 邮件列表 HTTP {resp.status_code}, body={resp.text[:200]}")
+        data = resp.json()
+        if isinstance(data, list):
+            items = data
+        else:
+            items = data.get("mail_list") or data.get("mails") or data.get("messages") or data.get("data") or []
+        return [item for item in items if isinstance(item, dict)]
+
+    def list_candidate_domains(self) -> list[str]:
+        return [d for d in self.domain if d]
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        last_error = ""
+        for domain in [d for d in self.domain if d]:
+            address = f"{username or _random_mailbox_name()}@{domain}".lower()
+            try:
+                self._list(address)  # 探测该域名的邮箱接口可用
+                return {"provider": self.name, "provider_ref": self.provider_ref, "address": address}
+            except RuntimeError as error:
+                last_error = str(error)
+        raise RuntimeError(last_error or "TempMail.plus 没有可用域名")
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        messages = self._list(mailbox["address"])
+        if not messages:
+            return None
+        item = messages[0]
+        message_id = str(item.get("mail_id") or item.get("id") or item.get("_id") or "").strip()
+        detail = item
+        if message_id:
+            resp = self.session.get(f"{self.api_base}/api/mails/{message_id}", params={"email": mailbox["address"]}, timeout=self.conf["request_timeout"], verify=False)
+            if resp.status_code == 200:
+                detail = resp.json() if isinstance(resp.json(), dict) else item
+        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": message_id, "subject": str(detail.get("subject") or ""), "sender": str(detail.get("from") or ""), "text_content": str(detail.get("text") or ""), "html_content": str(detail.get("html") or detail.get("body") or ""), "received_at": _parse_received_at(detail.get("time") or detail.get("date")), "raw": detail}
+
+    def close(self) -> None:
+        self.session.close()
+
+
+
+class FreeCustomProvider(BaseMailProvider):
+    name = "freecustom"
+    fallback_domains = ["ditapi.info", "ditcloud.info", "ditdrive.info", "ditgame.info", "ditlearn.info", "ditpay.info", "ditplay.info", "ditube.info", "ditmail.info", "fce.email"]
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = "https://www.freecustom.email"
+        self.domain = [str(d).strip().lower() for d in (entry.get("domain") or []) if str(d).strip()]
+        self.session = _create_session(conf)
+        self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json,text/plain,*/*", "Referer": "https://www.freecustom.email/en", "x-fce-client": "web-client"})
+
+    def _request(self, method: str, path: str, token: str = "", expected: tuple[int, ...] = (200,)) -> dict:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers=headers, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code not in expected:
+            raise RuntimeError(f"FreeCustom 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+        data = resp.json() if resp.text.strip() else {}
+        return data if isinstance(data, dict) else {"_list": data}
+
+    def list_candidate_domains(self) -> list[str]:
+        if self.domain:
+            return list(self.domain)
+        try:
+            token = str(self._request("POST", "/api/auth").get("token") or "")
+            data = self._request("GET", "/api/domains", token=token)
+            domains = [str(d.get("domain") or "").strip().lower() for d in (data.get("data") or []) if isinstance(d, dict) and str(d.get("tier") or "free").lower() in ("free", "")]
+            domains = [d for d in domains if d]
+            return domains or list(self.fallback_domains)
+        except Exception:
+            return list(self.fallback_domains)
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        auth = self._request("POST", "/api/auth")
+        token = str(auth.get("token") or "").strip()
+        if not token:
+            raise RuntimeError("FreeCustom auth 未返回 token")
+        domains = list(self.domain)
+        if not domains:
+            try:
+                data = self._request("GET", "/api/domains", token=token)
+                domains = [str(d.get("domain") or "").strip().lower() for d in (data.get("data") or []) if isinstance(d, dict) and str(d.get("tier") or "free").lower() in ("free", "")]
+                domains = [d for d in domains if d]
+            except RuntimeError:
+                domains = []
+        domains = domains or list(self.fallback_domains)
+        local = re.sub(r"[^a-z0-9_.\-]", "", (username or _random_mailbox_name()).strip().lower()).strip(".-_") or _random_mailbox_name()
+        address = f"{local}@{_next_domain(domains)}"
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token}
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        from urllib.parse import quote
+        token = str(mailbox.get("token") or "")
+        data = self._request("GET", f"/api/public-mailbox?fullMailboxId={quote(mailbox['address'])}", token=token)
+        items = data.get("_list") if "_list" in data else (data.get("messages") or data.get("data") or data.get("hydra:member") or [])
+        messages = [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        if not messages:
+            return None
+        item = messages[0]
+        message_id = str(item.get("id") or item.get("_id") or item.get("uid") or item.get("messageId") or "").strip()
+        detail = item
+        if message_id:
+            try:
+                resp = self._request("GET", f"/api/public-mailbox?fullMailboxId={quote(mailbox['address'])}&messageId={quote(message_id)}", token=token)
+                detail = resp.get("data") if isinstance(resp.get("data"), dict) else resp
+            except RuntimeError:
+                detail = item
+        text_content, html_content = _extract_content(detail)
+        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": message_id, "subject": str(detail.get("subject") or detail.get("title") or ""), "sender": str(detail.get("from") or detail.get("sender") or ""), "text_content": text_content, "html_content": html_content, "received_at": _parse_received_at(detail.get("date") or detail.get("createdAt") or detail.get("created_at")), "raw": detail}
+
+    def close(self) -> None:
+        self.session.close()
+
+
+
+class InboxKittenProvider(BaseMailProvider):
+    name = "inboxkitten"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = "https://inboxkitten.com/api/v1/mail"
+        self.session = _create_session(conf)
+        self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json, text/plain, */*", "Referer": "https://inboxkitten.com/"})
+
+    def list_candidate_domains(self) -> list[str]:
+        return ["inboxkitten.com"]
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        local = f"kiro{''.join(random.choices(string.hexdigits.lower()[:16], k=12))}"
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": f"{local}@inboxkitten.com"}
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        recipient = mailbox["address"].split("@")[0]
+        resp = self.session.get(f"{self.api_base}/list", params={"recipient": recipient}, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code != 200:
+            raise RuntimeError(f"InboxKitten 列表 HTTP {resp.status_code}")
+        items = [m for m in (resp.json() if isinstance(resp.json(), list) else []) if isinstance(m, dict)]
+        if not items:
+            return None
+        item = items[0]
+        storage = item.get("storage") if isinstance(item.get("storage"), dict) else {}
+        region, key = str(storage.get("region") or ""), str(storage.get("key") or "")
+        html = ""
+        if region and key:
+            dr = self.session.get(f"{self.api_base}/getHtml", params={"region": region, "key": key}, timeout=self.conf["request_timeout"], verify=False)
+            if dr.status_code == 200:
+                html = dr.text or ""
+        headers = (item.get("message") or {}).get("headers") if isinstance(item.get("message"), dict) else {}
+        headers = headers if isinstance(headers, dict) else {}
+        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": f"{region}:{key}", "subject": str(headers.get("subject") or ""), "sender": str(headers.get("from") or ""), "text_content": "", "html_content": html, "received_at": None, "raw": item}
+
+    def close(self) -> None:
+        self.session.close()
+
+
+
+class EmailnatorProvider(BaseMailProvider):
+    name = "emailnator"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = "https://www.emailnator.com"
+        self.session = _create_session(conf)
+        self.session.headers.update({"User-Agent": conf["user_agent"]})
+
+    def list_candidate_domains(self) -> list[str]:
+        return ["gmail.com"]
+
+    def _bootstrap(self) -> None:
+        from urllib.parse import unquote
+        self.session.get(f"{self.api_base}/", headers={"Accept": "text/html,*/*"}, timeout=self.conf["request_timeout"], verify=False)
+        xsrf = unquote(str(self.session.cookies.get("XSRF-TOKEN") or ""))
+        self.session.headers.update({"Accept": "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json;charset=UTF-8", "Origin": self.api_base, "Referer": f"{self.api_base}/"})
+        if xsrf:
+            self.session.headers["X-XSRF-TOKEN"] = xsrf
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        self._bootstrap()
+        for _ in range(20):
+            resp = self.session.post(f"{self.api_base}/generate-email", json={"email": ["plusGmail"]}, timeout=self.conf["request_timeout"], verify=False)
+            if resp.status_code != 200:
+                continue
+            emails = resp.json().get("email") if isinstance(resp.json(), dict) else resp.json()
+            emails = emails if isinstance(emails, list) else [emails]
+            address = next((str(e).strip().lower() for e in emails if str(e).strip().lower().endswith("@gmail.com")), "")
+            if address:
+                return {"provider": self.name, "provider_ref": self.provider_ref, "address": address}
+        raise RuntimeError("Emailnator 未生成 gmail 地址")
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        resp = self.session.post(f"{self.api_base}/message-list", json={"email": mailbox["address"]}, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        items = data.get("messageData") or data.get("data") or data.get("messages") or [] if isinstance(data, dict) else data
+        messages = [m for m in items if isinstance(m, dict)] if isinstance(items, list) else []
+        # 跳过 emailnator 自己的欢迎信（ADSABC 之类），保留真实邮件
+        messages = [m for m in messages if "adsabc" not in str(m.get("messageID") or "").lower()] or messages
+        if not messages:
+            return None
+        item = messages[0]
+        mid = next((str(item.get(k)) for k in ("messageID", "id", "msgid", "uid") if item.get(k)), "")
+        html = ""
+        if mid:
+            dr = self.session.post(f"{self.api_base}/message-list", json={"email": mailbox["address"], "messageID": mid}, timeout=self.conf["request_timeout"], verify=False)
+            if dr.status_code == 200:
+                html = dr.text or ""
+        return {"provider": self.name, "mailbox": mailbox["address"], "message_id": mid, "subject": str(item.get("subject") or ""), "sender": str(item.get("from") or ""), "text_content": "", "html_content": html or _json_all_strings(item), "received_at": None, "raw": item}
+
+    def close(self) -> None:
+        self.session.close()
+
+
+
 def _entries(mail_config: dict) -> list[dict]:
     result: list[dict] = []
     counters: dict[str, int] = {}
@@ -1647,6 +2009,18 @@ def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = 
         return OutlookTokenProvider(entry, conf)
     if entry["type"] == "dropmail":
         return DropMailProvider(entry, conf)
+    if entry["type"] == "mailtm":
+        return MailTmProvider(entry, conf)
+    if entry["type"] == "guerrillamail":
+        return GuerrillaMailProvider(entry, conf)
+    if entry["type"] == "tempmailplus":
+        return TempMailPlusProvider(entry, conf)
+    if entry["type"] == "freecustom":
+        return FreeCustomProvider(entry, conf)
+    if entry["type"] == "inboxkitten":
+        return InboxKittenProvider(entry, conf)
+    if entry["type"] == "emailnator":
+        return EmailnatorProvider(entry, conf)
     if entry["type"] == "openinbox":
         return OpenInboxProvider(entry, conf)
     raise RuntimeError(f"不支持的 mail.provider: {entry['type']}")

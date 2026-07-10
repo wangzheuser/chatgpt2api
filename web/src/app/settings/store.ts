@@ -340,6 +340,7 @@ type SettingsStore = {
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
+  setRegisterProviders: (providers: Array<Record<string, unknown>>) => void;
   saveRegister: () => Promise<void>;
   toggleRegister: () => Promise<void>;
   resetRegister: () => Promise<void>;
@@ -980,6 +981,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ...state.registerConfig.mail,
           providers: (state.registerConfig.mail.providers || []).filter((_, itemIndex) => itemIndex !== index),
         },
+      },
+    } : {});
+  },
+
+  setRegisterProviders: (providers) => {
+    set((state) => state.registerConfig ? {
+      registerConfig: {
+        ...state.registerConfig,
+        mail: { ...state.registerConfig.mail, providers },
       },
     } : {});
   },
