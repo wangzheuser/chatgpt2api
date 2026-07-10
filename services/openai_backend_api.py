@@ -553,7 +553,8 @@ class OpenAIBackendAPI:
         if not base_model:
             return "auto"
         if base_model == "gpt-image-2":
-            return "gpt-5-3"
+            # gpt-image-2 映射到 ChatGPT Web 的均衡/思考模式模型；旧 slug gpt-5-3 已被上游废弃导致生图失败
+            return "gpt-5-5-thinking"
         if base_model == CODEX_IMAGE_MODEL:
             return base_model
         return "auto"
