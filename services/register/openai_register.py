@@ -150,19 +150,6 @@ def _make_trace_headers() -> dict[str, str]:
 from utils.pkce import generate_pkce as _generate_pkce  # noqa: F401
 
 
-def _random_password(length: int = 16) -> str:
-    chars = string.ascii_letters + string.digits + "!@#$%"
-    value = list(
-        secrets.choice(string.ascii_uppercase)
-        + secrets.choice(string.ascii_lowercase)
-        + secrets.choice(string.digits)
-        + secrets.choice("!@#$%")
-        + "".join(secrets.choice(chars) for _ in range(max(0, length - 4)))
-    )
-    random.shuffle(value)
-    return "".join(value)
-
-
 def _random_name() -> tuple[str, str]:
     return random.choice(["James", "Robert", "John", "Michael", "David", "Mary", "Emma", "Olivia"]), random.choice(
         ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller"]
@@ -496,6 +483,8 @@ class PlatformRegistrar:
         self.code_verifier = ""
         self.platform_auth_code = ""
         self.last_otp_continue_url = ""
+        # authorize 落地页若直接进入邮箱验证码页，说明已是 passwordless signup，无需再发起切换
+        self.passwordless_signup = False
 
     def close(self) -> None:
         self.session.close()
@@ -582,10 +571,9 @@ class PlatformRegistrar:
             "audience": platform_oauth_audience,
             "redirect_uri": platform_oauth_redirect_uri,
             "device_id": self.device_id,
-            # 注册流程显式声明 signup：throwaway 域名 OpenAI 会自动当新账号走注册，
-            # 但 @outlook.com/@hotmail.com 这类真实消费邮箱会被 login_or_signup 路由到登录分支，
-            # 后续 user/register 落在错误的 auth step 上报 invalid_auth_step。
-            "screen_hint": "signup",
+            # 官网当前的新账号流程是 passwordless signup：authorize 后直接发送邮箱 OTP，
+            # 不再要求先调用 user/register 创建密码。
+            "screen_hint": "login_or_signup",
             "max_age": "0",
             "login_hint": email,
             "scope": "openid profile email offline_access",
@@ -616,51 +604,34 @@ class PlatformRegistrar:
             status = getattr(resp, "status_code", "unknown")
             raise RuntimeError(error or f"platform_authorize_http_{status}{detail}, {debug}")
         landed = _authorize_landed_page(resp)
-        # 仅打日志，不据此中断：authorize 落地页无法可靠区分注册/登录，
-        # 真正的判定交给 user/register（失败会 dump 完整响应）。
-        step(index, f"platform authorize 完成[{landed or '?'}] url={str(getattr(resp, 'url', '') or '')[:160]}")
+        final_url = str(getattr(resp, "url", "") or "")
+        self.passwordless_signup = "/email-verification" in final_url.lower()
+        # 某些 OAuth 客户端会直接进入邮箱验证码页；Platform 客户端通常仍先落到
+        # create-account/password，后续再通过 passwordless/send-otp 切换到验证码注册。
+        mode = "passwordless" if self.passwordless_signup else "password"
+        step(index, f"platform authorize 完成[{landed or '?'}] mode={mode} url={final_url[:160]}")
 
-    def _register_user(self, email: str, password: str, index: int) -> None:
-        step(index, "开始提交注册密码")
-        url = f"{auth_base}/api/accounts/user/register"
+    def _start_passwordless_signup(self, index: int) -> None:
+        step(index, "开始切换 passwordless signup 并发送验证码")
+        url = f"{auth_base}/api/accounts/passwordless/send-otp"
         headers = self._json_headers(f"{auth_base}/create-account/password")
-        headers["openai-sentinel-token"] = self._build_sentinel("username_password_create", index).token
         headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-        resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
+        resp, error = request_with_local_retry(self.session, "post", url, headers=headers, verify=False)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
             headers = self._json_headers(f"{auth_base}/create-account/password")
-            headers["openai-sentinel-token"] = self._build_sentinel("username_password_create", index).token
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-            resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
+            resp, error = request_with_local_retry(self.session, "post", url, headers=headers, verify=False)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code != 200:
             data = _response_json(resp) if resp is not None else {}
-            if data.get("message") == "Failed to create account. Please try again.":
-                step(index, "注册失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
-            raise RuntimeError(error or f"user_register_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
-        step(index, "提交注册密码完成")
-
-    def _send_otp(self, index: int) -> None:
-        step(index, "开始发送验证码")
-        url = f"{auth_base}/api/accounts/email-otp/send"
-        headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
-        resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
-        if _is_cloudflare_challenge(resp):
-            bundle = self._refresh_cloudflare_clearance(auth_base, index)
-            if bundle is None:
-                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
-            headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
-            resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
-            if _is_cloudflare_challenge(resp):
-                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
-        if resp is None or resp.status_code not in (200, 302):
-            raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}")
-        step(index, "发送验证码完成")
+            raise RuntimeError(error or f"passwordless_send_otp_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
+        self.passwordless_signup = True
+        step(index, "passwordless signup 验证码发送完成")
 
     def _validate_otp(self, code: str, index: int) -> None:
         step(index, f"开始校验验证码 {code}")
@@ -756,11 +727,12 @@ class PlatformRegistrar:
         label = str(mailbox.get("label") or "")
         step(index, f"邮箱创建完成[{label}]: {email}")
         try:
-            password = _random_password()
+            password = ""
             first_name, last_name = _random_name()
             self._platform_authorize(email, index)
-            self._register_user(email, password, index)
-            self._send_otp(index)
+            if not self.passwordless_signup:
+                self._start_passwordless_signup(index)
+            step(index, "已进入 passwordless signup，不创建本地不可用的随机密码")
             step(index, "开始等待注册验证码")
             code = wait_for_code(mailbox, register_proxy=self.proxy)
             if not code:

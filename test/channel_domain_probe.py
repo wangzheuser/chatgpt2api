@@ -68,11 +68,11 @@ def _probe_once(provider_type: str, domain: str, proxy: str, index: int) -> dict
             raise RuntimeError("邮箱服务未返回 address")
         result["mail_created"] = True
         result["address"] = email
-        password = openai_register._random_password()
         first, last = openai_register._random_name()
         registrar._platform_authorize(email, index)
-        registrar._register_user(email, password, index)
-        registrar._send_otp(index)
+        # 与主注册流程保持一致：走 passwordless signup，authorize 后直接发码，不再调已废弃的 user/register
+        if not registrar.passwordless_signup:
+            registrar._start_passwordless_signup(index)
         code = openai_register.wait_for_code(mailbox, register_proxy=proxy)
         if not code:
             raise RuntimeError("第一步：等待验证码超时（渠道未收到 OpenAI 验证码）")
