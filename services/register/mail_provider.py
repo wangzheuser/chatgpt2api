@@ -1512,7 +1512,9 @@ class DropMailProvider(BaseMailProvider):
         # 用新 token 查询旧 session 会得到 SESSION_NOT_FOUND。
         domains = self._graphql(self.token, "query Domains { domains(includeBroken:false) { id name } }").get("domains") or []
         by_name = {str(d.get("name") or "").strip().lower(): str(d.get("id") or "") for d in domains if isinstance(d, dict)}
-        domain_id = next((by_name[n] for n in self.preferred if by_name.get(n)), "")
+        # 从配置的可注册域名里随机选一个（而非固定第一个），避免首个域名被 OpenAI 封时全部撞同一个失败
+        matched_ids = [by_name[n] for n in self.preferred if by_name.get(n)]
+        domain_id = random.choice(matched_ids) if matched_ids else ""
         if not domain_id and domains:
             domain_id = str(domains[0].get("id") or "")
         inp: dict[str, Any] = {"withAddress": True}

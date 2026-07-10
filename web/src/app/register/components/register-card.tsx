@@ -154,8 +154,8 @@ export function RegisterCard() {
               </Button>
             </div>
 
-            <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
-              <p className="text-xs font-medium text-emerald-800">零配置渠道（勾选多个自动轮询，无需逐个添加）</p>
+            <div className="space-y-2 rounded-xl border border-stone-200 bg-white/70 p-3">
+              <p className="text-sm font-semibold text-stone-800">零配置渠道（勾选多个自动轮询，无需逐个添加）</p>
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                 {ZERO_CONFIG_CHANNELS.map((ch) => {
                   const checked = providers.some((p) => p.type === ch);
@@ -177,7 +177,7 @@ export function RegisterCard() {
                   );
                 })}
               </div>
-              <p className="text-xs text-stone-400">dropmail 会自动带上实测可注册域名；其余渠道用服务默认域名。临时邮箱域名可能被 OpenAI 动态封禁，多选可提高注册成功率。</p>
+              <p className="text-xs text-stone-500">dropmail 会自动带上实测可注册域名；其余渠道用服务默认域名。临时邮箱域名可能被 OpenAI 动态封禁，多选可提高注册成功率。</p>
             </div>
 
             <div className="grid gap-4 md:grid-cols-3">
