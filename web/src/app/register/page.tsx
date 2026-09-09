@@ -14,7 +14,7 @@ import { RegisterCard } from "./components/register-card";
 function RegisterDataController() {
   const didLoadRef = useRef(false);
   const loadRegister = useSettingsStore((state) => state.loadRegister);
-  const setRegisterConfig = useSettingsStore((state) => state.setRegisterConfig);
+  const mergeRegisterRuntime = useSettingsStore((state) => state.mergeRegisterRuntime);
 
   useEffect(() => {
     if (didLoadRef.current) return;
@@ -30,14 +30,18 @@ function RegisterDataController() {
       const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
       source = new EventSource(`${baseUrl}/api/register/events?token=${encodeURIComponent(token)}`);
       source.onmessage = (event) => {
-        setRegisterConfig(JSON.parse(event.data) as RegisterConfig);
+        try {
+          mergeRegisterRuntime(JSON.parse(event.data) as RegisterConfig);
+        } catch {
+          // 忽略无法解析的 SSE 数据，避免中断连接处理
+        }
       };
     });
     return () => {
       closed = true;
       source?.close();
     };
-  }, [setRegisterConfig]);
+  }, [mergeRegisterRuntime]);
 
   return null;
 }

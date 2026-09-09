@@ -337,6 +337,7 @@ type SettingsStore = {
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
+  mergeRegisterRuntime: (incoming: RegisterConfig) => void;
   setRegisterProxy: (value: string) => void;
   setRegisterTotal: (value: string) => void;
   setRegisterThreads: (value: string) => void;
@@ -927,6 +928,42 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setRegisterConfig: (config) => {
     set({ registerConfig: config, isLoadingRegister: false });
+  },
+
+  // SSE 推送只合并运行时字段（enabled/stats/logs 及 provider 邮箱池统计），
+  // 不覆盖表单配置字段：否则后端状态一变（如停止任务后的排水日志/统计刷新），
+  // 用户未保存的编辑会被静默回滚，随后点"保存"实际提交的是旧值（保存成功但内容回退的根因）。
+  mergeRegisterRuntime: (incoming) => {
+    set((state) => {
+      const current = state.registerConfig;
+      if (!current) {
+        return { registerConfig: incoming, isLoadingRegister: false };
+      }
+      const incomingProviders = Array.isArray(incoming.mail?.providers) ? incoming.mail.providers : [];
+      const RUNTIME_PROVIDER_KEYS = ["mailboxes_count", "mailboxes_preview", "mailboxes_stats"] as const;
+      const providers = (current.mail.providers || []).map((provider, index) => {
+        const incomingProvider = incomingProviders[index];
+        if (!incomingProvider || String(incomingProvider.type || "") !== String(provider.type || "")) {
+          return provider;
+        }
+        const runtimePatch: Record<string, unknown> = {};
+        for (const key of RUNTIME_PROVIDER_KEYS) {
+          if (key in incomingProvider) {
+            runtimePatch[key] = incomingProvider[key];
+          }
+        }
+        return Object.keys(runtimePatch).length > 0 ? { ...provider, ...runtimePatch } : provider;
+      });
+      return {
+        registerConfig: {
+          ...current,
+          enabled: Boolean(incoming.enabled),
+          stats: incoming.stats ?? current.stats,
+          logs: incoming.logs ?? current.logs,
+          mail: { ...current.mail, providers },
+        },
+      };
+    });
   },
 
   setRegisterProxy: (value) => {
