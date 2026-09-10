@@ -23,7 +23,7 @@ from services.protocol import (
 
 class ImageGenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
-    model: str = "gpt-image-2"
+    model: str = "gpt-image-2-5"
     n: int = Field(default=1, ge=1, le=4)
     size: str | None = None
     quality: str = "auto"

@@ -512,7 +512,7 @@ class ConfigStore:
 
     @property
     def default_upstream_model_name(self) -> str:
-        return str(self.data.get("default_upstream_model_name") or "gpt-5-5").strip()
+        return str(self.data.get("default_upstream_model_name") or "").strip() or "gpt-5-6"
 
     @property
     def default_thinking_effort(self) -> str:

@@ -566,8 +566,8 @@ class OpenAIBackendAPI:
         _, base_model = split_image_model(model)
         if not base_model:
             return "auto", ""
-        if base_model == "gpt-image-2":
-            # 使用可配置的上游模型名（默认 gpt-5-5）；旧 slug gpt-5-3 已被上游废弃，会导致生图失败
+        if base_model in {"gpt-image-2", "gpt-image-2-5"}:
+            # 使用可配置的上游模型名（默认 gpt-5-6）；旧 slug gpt-5-3 已被上游废弃，会导致生图失败
             upstream_model = config.default_upstream_model_name
         elif base_model == CODEX_IMAGE_MODEL:
             upstream_model = base_model

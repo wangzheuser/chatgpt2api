@@ -150,12 +150,13 @@ function filterImageModels(items: Model[]): ImageModel[] {
     .filter((id, index, list) => id.toLowerCase().includes("image") && list.indexOf(id) === index);
 }
 
+/** 优先保留已有选择，否则使用默认图片模型。 */
 function normalizeStoredImageModel(value: string | null, availableModels: ImageModel[]): ImageModel {
   const normalized = String(value || "").trim();
   if (normalized && availableModels.includes(normalized)) {
     return normalized;
   }
-  return availableModels[0] || "gpt-image-2";
+  return availableModels.includes("gpt-image-2-5") ? "gpt-image-2-5" : availableModels[0] || "gpt-image-2-5";
 }
 
 function buildReferenceImageFromResult(image: StoredImage, fileName: string): StoredReferenceImage | null {
@@ -469,8 +470,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [imageWidth, setImageWidth] = useState("1024");
   const [imageHeight, setImageHeight] = useState("1024");
   const [imageQuality, setImageQuality] = useState("auto");
-  const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
-  const [imageModels, setImageModels] = useState<ImageModel[]>(["gpt-image-2"]);
+  const [modelPreferenceLoaded, setModelPreferenceLoaded] = useState(false);
+  const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2-5");
+  const [imageModels, setImageModels] = useState<ImageModel[]>(["gpt-image-2-5"]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
@@ -688,6 +690,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   useEffect(() => {
     let cancelled = false;
 
+    const storedModel = window.localStorage.getItem(IMAGE_MODEL_STORAGE_KEY);
+    // 先恢复已有选择，再允许持久化默认值。
+    if (storedModel?.trim()) setImageModel(storedModel.trim());
+    setModelPreferenceLoaded(true);
+
     const loadImageModels = async () => {
       try {
         const data = await fetchModels();
@@ -696,7 +703,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           return;
         }
         setImageModels(available);
-        const storedModel = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_MODEL_STORAGE_KEY) : null;
         setImageModel((current) => {
           if (available.includes(current)) {
             return current;
@@ -705,7 +711,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         });
       } catch {
         if (!cancelled) {
-          setImageModels(["gpt-image-2"]);
+          setImageModels(["gpt-image-2-5"]);
         }
       }
     };
@@ -858,8 +864,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     window.localStorage.setItem(IMAGE_RATIO_STORAGE_KEY, imageRatio);
     window.localStorage.setItem(IMAGE_TIER_STORAGE_KEY, imageTier);
     window.localStorage.setItem(IMAGE_QUALITY_STORAGE_KEY, imageQuality);
-    window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
-  }, [imageRatio, imageTier, imageQuality, imageModel]);
+    if (modelPreferenceLoaded) window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
+  }, [imageRatio, imageTier, imageQuality, imageModel, modelPreferenceLoaded]);
 
   useEffect(() => {
     if (typeof window !== "undefined" && parsedCount > 0) {
