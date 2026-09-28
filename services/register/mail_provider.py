@@ -946,7 +946,8 @@ class MoEmailProvider(BaseMailProvider):
             self.domain = [str(item).strip() for item in raw_domains if str(item).strip()]
         else:
             self.domain = [str(raw_domains).strip()] if str(raw_domains).strip() else []
-        self.expiry_time = int(entry.get("expiry_time") or 0)
+        # MoEmail 服务端 expiryTime=0 表示永久邮箱；默认 1 小时，仅在 data/register.json 手动配置 expiry_time 时覆盖
+        self.expiry_time = int(entry.get("expiry_time") or 3600000)
         self.session = _create_session(conf)
 
     def _request(self, method: str, path: str, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
