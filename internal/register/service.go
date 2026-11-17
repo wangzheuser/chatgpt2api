@@ -25,6 +25,7 @@ type Service struct {
 	store    *store
 	runner   *sentinelRunner
 	clear    clearanceProvider
+	pool     *proxyPool
 
 	mu      sync.RWMutex
 	cfg     Config
@@ -51,6 +52,7 @@ func NewService(cfg *config.Config, accounts *service.AccountService, proxySvc *
 		store:    newStore(dataDir),
 		runner:   newSentinelRunner(nodeBin),
 		clear:    proxyClearance{svc: proxySvc},
+		pool:     newProxyPool(),
 	}
 	outlookStatePath = filepath.Join(dataDir, "outlook_token_used.json")
 	svc.cfg = svc.store.load()
@@ -103,12 +105,22 @@ func (r *recorder) bucket(kind, key string, success bool, err error) {
 }
 
 // Snapshot 返回对外可见配置与运行状态。
+// proxyStatusInline 返回代理池健康快照。
+func (s *Service) proxyStatusInline() []map[string]any {
+	if s.pool == nil {
+		return nil
+	}
+	return s.pool.status(s.cfg.Proxies, s.cfg.Proxy)
+}
+
 func (s *Service) Snapshot() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return map[string]any{"register": map[string]any{
 		"mail":             s.mailSnapshotLocked(),
 		"proxy":            s.cfg.Proxy,
+		"proxies":          s.cfg.Proxies,
+		"proxy_status":     s.proxyStatusInline(),
 		"total":            s.cfg.Total,
 		"threads":          s.cfg.Threads,
 		"mode":             s.cfg.Mode,
@@ -125,6 +137,7 @@ func (s *Service) Snapshot() map[string]any {
 type UpdateRequest struct {
 	Mail            *MailConfig `json:"mail"`
 	Proxy           *string     `json:"proxy"`
+	Proxies         *[]string   `json:"proxies"`
 	Total           *int        `json:"total"`
 	Threads         *int        `json:"threads"`
 	Mode            *string     `json:"mode"`
@@ -158,6 +171,9 @@ func (s *Service) Update(patch UpdateRequest) map[string]any {
 	}
 	if patch.Proxy != nil {
 		s.cfg.Proxy = strings.TrimSpace(*patch.Proxy)
+	}
+	if patch.Proxies != nil {
+		s.cfg.Proxies = *patch.Proxies
 	}
 	if patch.Total != nil {
 		s.cfg.Total = *patch.Total
@@ -371,7 +387,7 @@ func (s *Service) currentConfig() Config {
 	return s.cfg
 }
 
-// proxyURL 决定本次任务使用的出口代理。
+// proxyURL 返回单个回落代理（全局配置优先于内置默认）。
 func (s *Service) proxyURL(cfg Config) string {
 	if value := strings.TrimSpace(cfg.Proxy); value != "" {
 		return value
@@ -380,6 +396,11 @@ func (s *Service) proxyURL(cfg Config) string {
 		return strings.TrimSpace(s.config.Proxy)
 	}
 	return ""
+}
+
+// pickProxy 从批量池中轮询一个可用代理，池为空时回落到单个代理。
+func (s *Service) pickProxy(cfg Config) string {
+	return s.pool.pick(cfg.Proxies, s.proxyURL(cfg))
 }
 
 // poolMetrics 读取号池额度与可用账号数。
@@ -511,7 +532,7 @@ func maxInt(a, b int) int {
 func (s *Service) worker(ctx context.Context, index int) bool {
 	cfg := s.currentConfig()
 	started := time.Now()
-	proxy := s.proxyURL(cfg)
+	proxy := s.pickProxy(cfg)
 	rec := &recorder{svc: s}
 	// 邮箱 API 默认可用注册代理，但部分渠道会因数据中心 IP 直接断开，
 	// 关闭 api_use_register_proxy 后邮箱走本机直连、注册仍走代理。
@@ -541,10 +562,15 @@ func (s *Service) worker(ctx context.Context, index int) bool {
 	worker.codeWaiter = hub.waitCode
 	result, err := worker.run(ctx)
 	if err != nil {
+		if isProxyFailure(err) {
+			s.pool.markFailure(proxy)
+			s.appendLog(fmt.Sprintf("任务%d 出口代理判定失败并进入冷却: %s", index, redactProxy(proxy)), "yellow")
+		}
 		s.markMailboxResult(mailbox, false, err)
 		s.appendLog(fmt.Sprintf("任务%d 注册失败，耗时%.1fs，原因: %v", index, time.Since(started).Seconds(), err), "red")
 		return false
 	}
+	s.pool.markSuccess(proxy)
 	s.markMailboxResult(mailbox, true, nil)
 	if s.accounts != nil {
 		email := result.Email

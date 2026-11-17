@@ -947,3 +947,53 @@ Python 版（dev）的探针脚本直接跑会被 Cloudflare 403 拦住（curl_c
 
 - cmd/registerprobe：只做 authorize 的 Go 探针，已入库；配合 dev 的渠道脚本使用；
 - 用法：registerprobe -email name@example.com -proxy http://127.0.0.1:7890。
+
+---
+
+## 16. 批量出口代理（轮询 + 失败冷却）
+
+### 16.1 能力
+
+| 能力 | 说明 |
+| --- | --- |
+| 批量配置 | Config 增加 proxies 数组（每行一个），非空时优先于单个 proxy |
+| 任务级轮询 | 每个注册任务从池中取下一个代理，均摊出口 IP |
+| 归一化 | 去空、trim、去重，顺序保留 |
+| 失败冷却 | 同一代理连续失败 2 次进入 15 分钟冷却，期间不再被选中 |
+| 全冷却兜底 | 全部代理都在冷却时选冷却最早结束的一个，避免任务整体停摆 |
+| 成功恢复 | 任务成功即清零失败计数并解除冷却 |
+| 失败判定 | 错误文本命中 cloudflare / eof / connection reset / timeout / proxy / tls handshake 等特征才算代理问题，业务错误（如 registration_disallowed）不冷却代理 |
+| 状态展示 | 快照返回 proxy_status（state / fails / cooldown_sec），密码脱敏为 user:*** |
+| 兼容性 | 只配单个 proxy 时行为与之前完全一致 |
+
+### 16.2 配置示例
+
+    POST /api/register
+    {
+      "proxy": "",
+      "proxies": [
+        "http://127.0.0.1:7890",
+        "socks5h://user:pass@127.0.0.1:1080",
+        "http://user:pass@gw.example.com:8080"
+      ]
+    }
+
+前端改为多行文本框，一行一个；保存时单行回落到 proxy 字段、多行写入 proxies，两种形态都能读。
+
+### 16.3 验证
+
+| 测试 | 覆盖 |
+| --- | --- |
+| TestCandidatesFallback | 列表优先、回落单代理、空输入 |
+| TestProxyPoolRotation | 3 个代理各轮询 2 次（6 次任务） |
+| TestProxyPoolCooldown | 失败一次换下一个、连续两次冷却、冷却期跳过、成功后恢复 |
+| TestProxyPoolAllCooling | 全部冷却时仍返回可用代理 |
+| TestRedactProxy | http / socks5h 带口令脱敏、无口令原样 |
+| TestIsProxyFailure | 代理类错误判定、业务错误不误判 |
+| TestSnapshotExposesProxies | 快照包含 proxies 与 proxy_status |
+
+接口冒烟：写入 4 条（含重复与首尾空格）→ 归一化为 3 条；proxy_status 三条 ready 且密码脱敏；重启后配置仍在。
+
+### 16.4 仍未实现
+
+dev 的 {uuid} 代理模板（每次建连换随机会话 ID，用于轮换型代理服务商）尚未移植；当前批量列表已能覆盖「多固定出口轮换」的场景。

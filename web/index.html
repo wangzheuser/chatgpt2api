@@ -1732,9 +1732,17 @@
                 <label class="input input-sm"><input type="number" min="1" x-model.number="draft.check_interval"><span class="text-subtle">检查秒</span></label>
               </div>
             </div>
-            <div class="setting-row">
-              <div class="setting-text"><div class="setting-name">注册出口代理</div><p class="setting-desc">留空则使用全局代理。支持 socks5h/http。</p></div>
-              <input class="input input-sm mono" x-model="draft.proxy" placeholder="http://127.0.0.1:7890">
+            <div class="setting-row setting-row-block">
+              <div class="setting-text">
+                <div class="setting-name">注册出口代理</div>
+                <p class="setting-desc">每行一个，按任务轮询；连续失败 2 次的代理自动冷却 15 分钟。留空则使用全局代理，支持 http / socks5h。</p>
+              </div>
+              <textarea class="textarea textarea-sm mono" rows="3" x-model="draft.proxiesText" placeholder="http://127.0.0.1:7890&#10;socks5h://user:pass@127.0.0.1:1080"></textarea>
+              <div class="row row-wrap" x-show="(cfg?.proxy_status || []).length > 1">
+                <template x-for="item in (cfg?.proxy_status || [])" :key="item.proxy">
+                  <span class="badge badge-sm badge-soft mono" :class="item.state === 'cooling' ? 'badge-warning' : ''" x-text="item.proxy + (item.state === 'cooling' ? '（冷却 ' + item.cooldown_sec + 's）' : '')"></span>
+                </template>
+              </div>
             </div>
           </div>
         </div>

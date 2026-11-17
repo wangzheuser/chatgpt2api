@@ -78,16 +78,18 @@ type LogEntry struct {
 
 // Config 是持久化到 data/register.json 的注册机配置。
 type Config struct {
-	Mail            MailConfig `json:"mail"`
-	Proxy           string     `json:"proxy"`
-	Total           int        `json:"total"`
-	Threads         int        `json:"threads"`
-	Mode            string     `json:"mode"`
-	TargetQuota     int        `json:"target_quota"`
-	TargetAvailable int        `json:"target_available"`
-	CheckInterval   int        `json:"check_interval"`
-	Enabled         bool       `json:"enabled"`
-	Stats           Stats      `json:"stats"`
+	Mail  MailConfig `json:"mail"`
+	Proxy string     `json:"proxy"`
+	// Proxies 为批量注册出口代理，非空时优先于 Proxy 并轮询使用。
+	Proxies         []string `json:"proxies"`
+	Total           int      `json:"total"`
+	Threads         int      `json:"threads"`
+	Mode            string   `json:"mode"`
+	TargetQuota     int      `json:"target_quota"`
+	TargetAvailable int      `json:"target_available"`
+	CheckInterval   int      `json:"check_interval"`
+	Enabled         bool     `json:"enabled"`
+	Stats           Stats    `json:"stats"`
 }
 
 const (
@@ -156,6 +158,21 @@ func safeBool(value any, fallback bool) bool {
 	return fallback
 }
 
+// normalizeProxyList 去空、去重并保持顺序。
+func normalizeProxyList(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 func normalizeMode(value string) string {
 	switch strings.TrimSpace(value) {
 	case ModeQuota:
@@ -200,6 +217,8 @@ func (c *Config) normalize() {
 	if c.Proxy == "" {
 		c.Proxy = base.Proxy
 	}
+	c.Proxies = normalizeProxyList(c.Proxies)
+	c.Proxy = strings.TrimSpace(c.Proxy)
 	stats := c.Stats
 	if stats.Threads < 1 {
 		stats.Threads = c.Threads

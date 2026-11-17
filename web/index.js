@@ -979,7 +979,7 @@ Alpine.data("register", () => {
     modes: [["total", "按数量"], ["quota", "按额度"], ["available", "按账号"]],
     poolStates: [["unused", "未用"], ["in_use", "占用"], ["used", "已用"], ["token_invalid", "失效"], ["failed", "失败"]],
     outlookPoolInput: "",
-    draft: { total: 10, threads: 3, mode: "total", target_quota: 100, target_available: 10, check_interval: 5, proxy: "", providers: [] },
+    draft: { total: 10, threads: 3, mode: "total", target_quota: 100, target_available: 10, check_interval: 5, proxiesText: "", providers: [] },
 
     init() {
       this.load(false);
@@ -1012,7 +1012,7 @@ Alpine.data("register", () => {
         target_quota: register.target_quota,
         target_available: register.target_available,
         check_interval: register.check_interval,
-        proxy: register.proxy || "",
+        proxiesText: ((register.proxies && register.proxies.length ? register.proxies : [register.proxy]).filter(Boolean)).join("\n"),
         mail: { request_timeout: mail.request_timeout, wait_timeout: mail.wait_timeout, wait_interval: mail.wait_interval, api_use_register_proxy: mail.api_use_register_proxy },
         providers: (mail.providers || []).map((item) => ({ type: item.type, enable: !!item.enable, domain: (item.domain || []).join(", ") })),
       };
@@ -1038,6 +1038,7 @@ Alpine.data("register", () => {
     async save() {
       this.busy = "save";
       try {
+        const proxyList = String(this.draft.proxiesText || "").split("\n").map((value) => value.trim()).filter(Boolean);
         const providers = this.draft.providers.map((item) => ({
           type: item.type,
           enable: !!item.enable,
@@ -1051,7 +1052,8 @@ Alpine.data("register", () => {
           target_quota: this.draft.target_quota,
           target_available: this.draft.target_available,
           check_interval: this.draft.check_interval,
-          proxy: this.draft.proxy,
+          proxy: proxyList[0] || "",
+          proxies: proxyList.length > 1 ? proxyList : [],
           mail: { ...this.draft.mail, providers },
         };
         const data = await api("/api/register", { method: "POST", body: payload });
