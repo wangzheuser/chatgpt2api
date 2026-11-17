@@ -969,6 +969,117 @@ const importText = (data) => `新增 ${data.added} 个，跳过 ${data.skipped} 
 
 const accountOf = (raw) => raw.access_token || raw.accessToken ? { ...raw, access_token: raw.access_token || raw.accessToken, accessToken: undefined } : null;
 
+Alpine.data("register", () => {
+  let timer = null;
+  return {
+    cfg: null,
+    stats: {},
+    logs: [],
+    busy: "",
+    modes: [["total", "按数量"], ["quota", "按额度"], ["available", "按账号"]],
+    poolStates: [["unused", "未用"], ["in_use", "占用"], ["used", "已用"], ["token_invalid", "失效"], ["failed", "失败"]],
+    outlookPoolInput: "",
+    draft: { total: 10, threads: 3, mode: "total", target_quota: 100, target_available: 10, check_interval: 5, proxy: "", providers: [] },
+
+    init() {
+      this.load(false);
+      timer = setInterval(() => this.load(true), 2000);
+    },
+
+    destroy() {
+      clearInterval(timer);
+    },
+
+    async load(silent) {
+      try {
+        const data = await api("/api/register");
+        this.apply(data.register, silent);
+      } catch (error) {
+        if (!silent) toast(String(error?.message || error), "error");
+      }
+    },
+
+    apply(register, silent) {
+      this.cfg = register;
+      this.stats = register.stats || {};
+      this.logs = (register.logs || []).slice().reverse();
+      if (silent && this.cfg) return;
+      const mail = register.mail || {};
+      this.draft = {
+        total: register.total,
+        threads: register.threads,
+        mode: register.mode,
+        target_quota: register.target_quota,
+        target_available: register.target_available,
+        check_interval: register.check_interval,
+        proxy: register.proxy || "",
+        mail: { request_timeout: mail.request_timeout, wait_timeout: mail.wait_timeout, wait_interval: mail.wait_interval, api_use_register_proxy: mail.api_use_register_proxy },
+        providers: (mail.providers || []).map((item) => ({ type: item.type, enable: !!item.enable, domain: (item.domain || []).join(", ") })),
+      };
+    },
+
+    outlook() {
+      return (this.cfg?.mail?.providers || []).find((item) => item.type === "outlook_token") || null;
+    },
+
+    async resetPool(scope) {
+      this.busy = "pool";
+      try {
+        const data = await api("/api/register/outlook-pool/reset", { method: "POST", body: { scope } });
+        this.apply(data.register, false);
+        toast("Outlook 池状态已重置（" + scope + "）");
+      } catch (error) {
+        toast(String(error?.message || error), "error");
+      } finally {
+        this.busy = "";
+      }
+    },
+
+    async save() {
+      this.busy = "save";
+      try {
+        const providers = this.draft.providers.map((item) => ({
+          type: item.type,
+          enable: !!item.enable,
+          domain: String(item.domain || "").split(",").map((value) => value.trim()).filter(Boolean),
+          mailboxes: item.type === "outlook_token" ? this.outlookPoolInput : "",
+        }));
+        const payload = {
+          total: this.draft.total,
+          threads: this.draft.threads,
+          mode: this.draft.mode,
+          target_quota: this.draft.target_quota,
+          target_available: this.draft.target_available,
+          check_interval: this.draft.check_interval,
+          proxy: this.draft.proxy,
+          mail: { ...this.draft.mail, providers },
+        };
+        const data = await api("/api/register", { method: "POST", body: payload });
+        this.outlookPoolInput = "";
+        this.apply(data.register, false);
+        toast("注册配置已保存");
+      } catch (error) {
+        toast(String(error?.message || error), "error");
+      } finally {
+        this.busy = "";
+      }
+    },
+
+    async act(action) {
+      this.busy = action;
+      try {
+        const data = await api(`/api/register/${action}`, { method: "POST" });
+        this.apply(data.register, true);
+        toast(action === "start" ? "注册任务已启动" : action === "stop" ? "已请求停止" : "统计已重置");
+      } catch (error) {
+        toast(String(error?.message || error), "error");
+      } finally {
+        this.busy = "";
+      }
+    },
+  };
+});
+
 Alpine.data("accounts", () => {
   const timers = {};
 
@@ -1905,6 +2016,7 @@ const routes = {
   "/overview": { page: "overview", role: ADMIN },
   "/chat": { page: "chat" },
   "/accounts": { page: "accounts", role: ADMIN },
+  "/register": { page: "register", role: ADMIN },
   "/keys": { page: "keys", role: ADMIN },
   "/gallery": { page: "gallery", role: ADMIN },
   "/logs": { page: "logs", role: ADMIN },
@@ -1918,6 +2030,7 @@ const adminNav = [
   { group: "管理" },
   { path: "/overview", label: "概览", icon: "layout-dashboard" },
   { path: "/accounts", label: "号池", icon: "users-round" },
+  { path: "/register", label: "注册机", icon: "plus" },
   { path: "/keys", label: "密钥", icon: "key-round" },
   { path: "/gallery", label: "图库", icon: "images" },
   { path: "/logs", label: "日志", icon: "scroll-text" },

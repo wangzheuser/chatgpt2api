@@ -1664,6 +1664,141 @@
       </article>
     </div>
   </template>
+
+  <template id="page-register">
+    <div class="page" x-data="register">
+      <div class="page-head">
+        <h1 class="title-page">注册机</h1>
+        <div class="row">
+          <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="act('reset')"><ui-icon name="refresh-cw" class="icon-sm"></ui-icon>重置统计</button>
+          <button type="button" class="btn btn-sm" x-show="cfg && cfg.enabled" :disabled="busy !== ''" @click="act('stop')"><span class="loading loading-spinner loading-xs" x-show="busy === 'stop'"></span>停止</button>
+          <button type="button" class="btn btn-sm btn-primary" x-show="!cfg || !cfg.enabled" :disabled="busy !== '' || !cfg" @click="act('start')"><span class="loading loading-spinner loading-xs" x-show="busy === 'start'"></span>开始注册</button>
+          <button type="button" class="btn btn-sm btn-primary" x-show="cfg && !cfg.enabled" :disabled="busy !== ''" @click="save()"><span class="loading loading-spinner loading-xs" x-show="busy === 'save'"></span>保存配置</button>
+        </div>
+      </div>
+
+      <div class="center-fill" x-show="!cfg"><span class="loading loading-spinner loading-sm"></span></div>
+
+      <div class="vstack vstack-lg" x-show="cfg">
+        <div class="grid grid-2">
+          <div class="panel">
+            <div class="vstack vstack-sm">
+              <div class="row"><span class="text-subtle">运行状态</span><span class="badge badge-sm badge-soft" :class="cfg && cfg.enabled ? 'badge-success' : 'badge-neutral'" x-text="cfg && cfg.enabled ? '运行中' : '已停止'"></span></div>
+              <div class="inline-stats">
+                <div><span class="text-subtle">成功</span><strong x-text="stats.success || 0"></strong></div>
+                <div><span class="text-subtle">失败</span><strong x-text="stats.fail || 0"></strong></div>
+                <div><span class="text-subtle">运行中</span><strong x-text="stats.running || 0"></strong></div>
+                <div><span class="text-subtle">成功率</span><strong x-text="(stats.success_rate || 0) + '%'"></strong></div>
+                <div><span class="text-subtle">平均耗时</span><strong x-text="(stats.avg_seconds || 0) + 's'"></strong></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="vstack vstack-sm">
+              <div class="row"><span class="text-subtle">号池</span><span class="badge badge-sm badge-soft" x-text="'模式 ' + (cfg ? cfg.mode : '')"></span></div>
+              <div class="inline-stats">
+                <div><span class="text-subtle">可用账号</span><strong x-text="stats.current_available || 0"></strong></div>
+                <div><span class="text-subtle">剩余额度</span><strong x-text="stats.current_quota || 0"></strong></div>
+                <div><span class="text-subtle">目标账号</span><strong x-text="draft.target_available"></strong></div>
+                <div><span class="text-subtle">目标额度</span><strong x-text="draft.target_quota"></strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="vstack vstack-sm">
+            <h2 class="title-section">运行参数</h2>
+            <div class="setting-row">
+              <div class="setting-text"><div class="setting-name">停止条件</div><p class="setting-desc">按提交数量、号池额度或可用账号数决定何时停止。</p></div>
+              <div class="tabs tabs-box tabs-sm segmented">
+                <template x-for="[value, label] in modes" :key="value">
+                  <button type="button" class="tab" :class="{ 'tab-active': draft.mode === value }" @click="draft.mode = value" x-text="label"></button>
+                </template>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text"><div class="setting-name">注册数量 / 线程数</div><p class="setting-desc">total 模式下按数量停止；线程数决定并发注册数，过高容易触发上游限流。</p></div>
+              <div class="row">
+                <label class="input input-sm"><input type="number" min="1" x-model.number="draft.total"><span class="text-subtle">个</span></label>
+                <label class="input input-sm"><input type="number" min="1" max="20" x-model.number="draft.threads"><span class="text-subtle">线程</span></label>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text"><div class="setting-name">目标额度 / 目标账号</div><p class="setting-desc">quota 模式看号池剩余额度，available 模式看可用账号数。</p></div>
+              <div class="row">
+                <label class="input input-sm"><input type="number" min="1" x-model.number="draft.target_quota"><span class="text-subtle">额度</span></label>
+                <label class="input input-sm"><input type="number" min="1" x-model.number="draft.target_available"><span class="text-subtle">账号</span></label>
+                <label class="input input-sm"><input type="number" min="1" x-model.number="draft.check_interval"><span class="text-subtle">检查秒</span></label>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-text"><div class="setting-name">注册出口代理</div><p class="setting-desc">留空则使用全局代理。支持 socks5h/http。</p></div>
+              <input class="input input-sm mono" x-model="draft.proxy" placeholder="http://127.0.0.1:7890">
+            </div>
+          </div>
+        </div>
+
+        <div class="panel panel-flush">
+          <div class="table-wrap">
+            <table class="table table-sm">
+              <thead><tr><th>邮箱渠道</th><th>启用</th><th>域名（逗号分隔，留空用服务默认）</th></tr></thead>
+              <tbody>
+                <template x-for="(item, index) in draft.providers" :key="index">
+                  <tr>
+                    <td class="mono nowrap" x-text="item.type"></td>
+                    <td><input type="checkbox" class="toggle toggle-sm" x-model="item.enable"></td>
+                    <td><input class="input input-sm mono" x-model="item.domain" placeholder="mail2me.co, pickmemail.com"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <template x-if="outlook()">
+          <div class="panel">
+            <div class="vstack vstack-sm">
+              <div class="row">
+                <h2 class="title-section">Outlook 邮箱池</h2>
+                <span class="badge badge-sm badge-soft" x-text="'已导入 ' + (outlook().mailboxes_count || 0)"></span>
+                <template x-for="[key, label] in poolStates" :key="key">
+                  <span class="badge badge-sm badge-soft" x-show="outlook().mailboxes_stats && outlook().mailboxes_stats[key]" x-text="label + ' ' + outlook().mailboxes_stats[key]"></span>
+                </template>
+                <span class="grow"></span>
+                <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="resetPool('failed')">释放占用</button>
+                <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="resetPool('unused')">清理未使用</button>
+                <button type="button" class="btn btn-ghost btn-sm" :disabled="busy !== ''" @click="resetPool('all')">重置状态</button>
+              </div>
+              <p class="text-subtle">每行 email----password----client_id----refresh_token；留空表示不修改，导入内容与已存池按邮箱合并，成功注册的邮箱标记为已用。</p>
+              <textarea class="textarea textarea-sm mono" rows="4" x-model="outlookPoolInput" placeholder="name@outlook.com----password----client_id----refresh_token"></textarea>
+              <div class="row row-wrap" x-show="(outlook().mailboxes_preview || []).length > 0">
+                <template x-for="item in (outlook().mailboxes_preview || [])" :key="item">
+                  <span class="badge badge-sm badge-soft mono" x-text="item"></span>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <div class="panel">
+          <div class="vstack vstack-sm">
+            <div class="row"><h2 class="title-section">运行日志</h2><span class="text-subtle">最近 300 条</span></div>
+            <div x-show="logs.length === 0" class="empty">还没有日志</div>
+            <div class="vstack vstack-xs" style="max-height: 320px; overflow-y: auto;">
+              <template x-for="(item, index) in logs" :key="index">
+                <div class="row">
+                  <span class="text-subtle mono nowrap" x-text="$time(item.time)"></span>
+                  <span :class="item.level === 'red' ? 'text-error' : item.level === 'green' ? 'text-success' : item.level === 'yellow' ? 'text-warning' : ''" x-text="item.text"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+
 </body>
 </html>
 

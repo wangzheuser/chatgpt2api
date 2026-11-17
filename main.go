@@ -11,6 +11,7 @@ import (
 
 	"github.com/basketikun/chatgpt2api/internal/config"
 	"github.com/basketikun/chatgpt2api/internal/handler"
+	"github.com/basketikun/chatgpt2api/internal/register"
 	"github.com/basketikun/chatgpt2api/internal/repository"
 	"github.com/basketikun/chatgpt2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -58,6 +59,8 @@ func main() {
 	handler.NewOAuthHandler(service.NewOAuthService(proxyService), accountService).RegisterRoutes(admin)
 	handler.NewSourceHandler(service.NewSourceService(repo, accountService, proxyService)).RegisterRoutes(admin)
 	imageHandler.RegisterRoutes(admin)
+	// 注册机（dev 分支移植，配置与状态独立于 config.yaml）
+	register.NewHandler(register.NewService(cfg, accountService, proxyService)).RegisterRoutes(admin)
 	handler.NewLogHandler(logService).RegisterRoutes(admin)
 	handler.NewOverviewHandler(service.NewOverviewService(repo)).RegisterRoutes(admin)
 	v1 := engine.Group("/v1", identity)

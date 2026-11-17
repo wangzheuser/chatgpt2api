@@ -26,3 +26,9 @@ debug
 .claude
 artifacts
 .DS_Store
+
+# 本地构建残留与运行配置
+.setting/
+.setting.pet_localtest/
+web_dist/
+web/next-env.d.ts
