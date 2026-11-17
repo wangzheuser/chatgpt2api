@@ -211,7 +211,7 @@ func TestOutlookProviderCreateAndFetch(t *testing.T) {
 		t.Fatal("picked credential should be marked in_use")
 	}
 	mailbox.Seen = map[string]bool{}
-	mailbox.CodeNotBefore = time.Now().Add(-time.Hour).UTC()
+	mailbox.CodeNotBefore = time.Now().Add(-24 * time.Hour).UTC()
 
 	message, ok, err := provider.fetchLatest(context.Background(), mailbox)
 	if err != nil || !ok {

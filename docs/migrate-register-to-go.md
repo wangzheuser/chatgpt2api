@@ -997,3 +997,56 @@ Python 版（dev）的探针脚本直接跑会被 Cloudflare 403 拦住（curl_c
 ### 16.4 仍未实现
 
 dev 的 {uuid} 代理模板（每次建连换随机会话 ID，用于轮换型代理服务商）尚未移植；当前批量列表已能覆盖「多固定出口轮换」的场景。
+
+---
+
+## 17. {uuid} 代理会话模板（每次任务轮换出口 IP）
+
+### 17.1 机制
+
+部分轮换型出口代理把会话 ID 放在用户名里，形如：
+
+    http://user.{uuid}:pass@gw.example.com:9000
+
+注册机在**每个任务开始时**把 {uuid} 渲染成一个新的会话 ID，代理服务商据此为本次会话分配独立出口 IP，从而做到「一次注册一个 IP」。
+
+### 17.2 语义
+
+| 规则 | 说明 |
+| --- | --- |
+| 会话 ID 格式 | 32 位小写十六进制（等同 uuid4().hex，无短横线），兼容不接受短横线的代理商账号规则 |
+| 多个占位符同值 | 同一 URL 内所有 {uuid} 替换成同一个值，保证同一次会话的代理身份一致 |
+| 配置层不渲染 | 保存与回显都保留 {uuid} 原样，只在任务执行时渲染；重启后模板仍在 |
+| 健康统计按模板 | 代理冷却计数记录在模板字符串上，渲染后的临时会话不会污染池统计 |
+| 与批量列表组合 | proxies 里每一条都可以带 {uuid}，先轮询选条目、再渲染会话 |
+| 无占位符不变 | 普通代理（如 http://127.0.0.1:7890）走原逻辑，零影响 |
+
+### 17.3 用法
+
+    POST /api/register
+    {
+      "proxies": [
+        "http://user.{uuid}:pass@gw1.example.com:9000",
+        "http://user.{uuid}:pass@gw2.example.com:9000"
+      ]
+    }
+
+任务 1 用 gw1 + 会话 A，任务 2 用 gw2 + 会话 B，任务 3 回到 gw1 + 会话 C，依此类推。
+
+### 17.4 验证
+
+| 测试 | 覆盖 |
+| --- | --- |
+| TestRenderProxyTemplatePassthrough | 空串、普通代理、已含口令代理原样返回 |
+| TestRenderProxyTemplateSingle | 单占位符渲染为 32 位小写 hex，口令与主机保留 |
+| TestRenderProxyTemplateMultipleSameSession | http://{uuid}:{uuid}@host 两处取值相同 |
+| TestRenderProxyTemplateUniqueness | 连续两次渲染得到不同会话 |
+| TestHasProxyTemplate | 占位符识别 |
+| TestRenderThenNormalize | socks5 模板渲染后再规范化仍保留会话并升级为 socks5h |
+| TestProxyStatusKeepsTemplate | 状态展示保留 {uuid}、口令脱敏 |
+
+接口冒烟：写入含模板的批量列表 → 回显仍为 http://user.{uuid}:password@... → proxy_status 显示 http://user.{uuid}:***@... 。
+
+### 17.5 与上游一致的细节
+
+dev 的 utils/proxy_template.py 在 PlatformRegistrar 初始化时渲染一次，并让邮箱会话与 OpenAI 会话复用同一个渲染结果（避免 {uuid} 泄漏到不同出口）。Go 版同样在 worker 入口渲染一次，随后传给 HTTP 会话与邮箱渠道，行为一致。

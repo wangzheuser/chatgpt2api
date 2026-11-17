@@ -532,7 +532,9 @@ func maxInt(a, b int) int {
 func (s *Service) worker(ctx context.Context, index int) bool {
 	cfg := s.currentConfig()
 	started := time.Now()
-	proxy := s.pickProxy(cfg)
+	// rawProxy 可能含 {uuid} 模板：健康统计按模板记录，实际连接用渲染后的会话代理。
+	rawProxy := s.pickProxy(cfg)
+	proxy := renderProxyTemplate(rawProxy)
 	rec := &recorder{svc: s}
 	// 邮箱 API 默认可用注册代理，但部分渠道会因数据中心 IP 直接断开，
 	// 关闭 api_use_register_proxy 后邮箱走本机直连、注册仍走代理。
@@ -563,14 +565,14 @@ func (s *Service) worker(ctx context.Context, index int) bool {
 	result, err := worker.run(ctx)
 	if err != nil {
 		if isProxyFailure(err) {
-			s.pool.markFailure(proxy)
+			s.pool.markFailure(rawProxy)
 			s.appendLog(fmt.Sprintf("任务%d 出口代理判定失败并进入冷却: %s", index, redactProxy(proxy)), "yellow")
 		}
 		s.markMailboxResult(mailbox, false, err)
 		s.appendLog(fmt.Sprintf("任务%d 注册失败，耗时%.1fs，原因: %v", index, time.Since(started).Seconds(), err), "red")
 		return false
 	}
-	s.pool.markSuccess(proxy)
+	s.pool.markSuccess(rawProxy)
 	s.markMailboxResult(mailbox, true, nil)
 	if s.accounts != nil {
 		email := result.Email
