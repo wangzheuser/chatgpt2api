@@ -904,3 +904,46 @@ fe03aac feat: restore registration feature
 - 原待办 3（其余渠道）已补 mailtm/mailgw，仍缺 freecustom、tempmailplus、inboxkitten、guerrillamail、emailnator、moemail、yyds、ddg_mail 等。
 - 原待办 4（前端 SSE）：当前仍为 2s 轮询。
 - 原待办 5（真实端到端）：受邮箱域名白名单限制，未完成。
+
+---
+
+## 15. 渠道可用性探测（2026-11-17）
+
+### 15.1 探测方法
+
+Python 版（dev）的探针脚本直接跑会被 Cloudflare 403 拦住（curl_cffi 指纹被识别），无法评估渠道本身。因此改用两段式探测：
+
+1. **Python 侧建箱与收码**：dev 的 test/channel_register_probe.py 与 mail_provider，负责创建邮箱、轮询验证码；
+2. **Go 侧 authorize**：新增 cmd/registerprobe（只调用 /api/accounts/authorize），用 tls-client 指纹绕过 Cloudflare 触发上游发信。
+
+两段串起来就能判断「渠道能否建箱 → 邮箱域能否触发发信 → 能否收到验证码」，只有全部通过才值得移植到 Go 版。
+
+### 15.2 探测矩阵
+
+| 渠道 | 建箱 | authorize | 收码 | create_account | 判定 |
+| --- | --- | --- | --- | --- | --- |
+| freecustom | 通过 | 通过 | 通过（7–8s） | registration_disallowed | 域名可用、出口 IP 被风控；已移植 |
+| openinbox | 通过 | 通过 | 通过（7–9s） | unsupported_email | 域名被上游拒绝；保留但不推荐 |
+| dropmail | 通过 | 通过 | 超时 | — | 该出口下不发信 |
+| mailtm | 通过 | 通过 | 超时 + 429 | — | 域名不在白名单，且免费 API 限流 |
+| guerrillamail | 通过 | 通过 | 超时 | — | 不发信 |
+| inboxkitten | 通过 | 通过 | 超时 | — | 不发信 |
+| tempmailplus | 超时 | — | — | — | 服务不可达 |
+| emailnator | 建箱失败 | — | — | — | 服务已改版（未生成 gmail 地址） |
+| tempmail_lol | 403 | — | — | — | 中国大陆 IP 被服务方禁用免费层 |
+| ddg_mail | 需 ddg_token | — | — | — | 需配置凭据 |
+| duckmail / gptmail / yyds_mail | 需 api_key | — | — | — | 需配置凭据 |
+| moemail | 需 api_base | — | — | — | 需自建服务 |
+| cloudflare_temp_email / cloudmail_gen / inbucket | 自建 | — | — | — | 需部署对应服务 |
+
+### 15.3 结论
+
+1. **只有 freecustom 值得移植**：它是唯一「零配置 + 能收到 OpenAI 验证码」的新渠道，已加入 Go 版。
+2. **registration_disallowed 与渠道无关**：freecustom 连续 3 次都在 create_account 被拒，错误从 openinbox 的 unsupported_email 变成 registration_disallowed，说明邮箱域已通过校验、阻拦发生在出口 IP 的风控层。换干净住宅 IP 才有机会通过。
+3. 其余渠道当前均无移植价值：要么不发信（域名不在白名单），要么服务已失效，要么需要额外凭据/自建服务。
+4. openinbox 与 freecustom 都保留在现网可切换，等域名或 IP 条件变化时可直接启用。
+
+### 15.4 探针工具
+
+- cmd/registerprobe：只做 authorize 的 Go 探针，已入库；配合 dev 的渠道脚本使用；
+- 用法：registerprobe -email name@example.com -proxy http://127.0.0.1:7890。

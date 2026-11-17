@@ -58,6 +58,7 @@ var mailRegistry = map[string]mailFactory{
 	"dropmail":      newDropMailProvider,
 	"openinbox":     newOpenInboxProvider,
 	"outlook_token": newOutlookTokenProvider,
+	"freecustom":    newFreeCustomProvider,
 	"mailtm":        newMailTmProvider,
 	"mailgw":        newMailGwProvider,
 }
